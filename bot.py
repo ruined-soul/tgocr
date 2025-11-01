@@ -1,47 +1,54 @@
 import os
+import asyncio
 from aiohttp import web
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-from src.handlers import start, handle_file, worker
-import asyncio
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", "8000"))
-APP_URL = os.getenv("APP_URL")  # e.g. https://your-app-name.koyeb.app
+APP_URL = os.getenv("APP_URL", "").rstrip("/")
 
-async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# --- Define the bot ---
+app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+# /start command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("✅ /start received")
+    await update.message.reply_text("👋 Hello! The bot is alive and ready!")
 
-    # Background worker task
-    asyncio.create_task(worker())
+app.add_handler(CommandHandler("start", start))
 
-    # --- webhook setup ---
-    async def handle_webhook(request):
+# --- Webhook handler ---
+async def handle_webhook(request):
+    try:
         data = await request.json()
+        print("🔔 Incoming update:", data)
         update = Update.de_json(data, app.bot)
         await app.process_update(update)
-        return web.Response(text="ok")
+    except Exception as e:
+        print("❌ Error in webhook handler:", e)
+    return web.Response(status=200)
+
+# --- Main startup ---
+async def main():
+    webhook_path = "/webhook"
+    webhook_url = f"{APP_URL}{webhook_path}"
 
     web_app = web.Application()
-    web_app.add_routes([web.post("/webhook", handle_webhook)])
-
-    # Set Telegram webhook
-    webhook_url = f"{APP_URL}/webhook"
-    await app.bot.set_webhook(webhook_url)
-    print(f"🌐 Webhook set to {webhook_url}")
+    web_app.router.add_post(webhook_path, handle_webhook)
 
     runner = web.AppRunner(web_app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    print(f"🤖 Bot running on port {PORT}")
+    site = web.TCPSite(runner, "0.0.0.0", 8000)
     await site.start()
 
-    # Keep alive
-    await asyncio.Event().wait()
+    # Reset and set webhook
+    await app.bot.delete_webhook()
+    await app.bot.set_webhook(url=webhook_url)
 
+    print(f"🌐 Webhook set to {webhook_url}")
+    print("🤖 Bot running on port 8000")
+
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
