@@ -10,7 +10,6 @@ APP_URL = os.getenv("APP_URL", "").rstrip("/")
 # --- Define the bot ---
 app = Application.builder().token(BOT_TOKEN).build()
 
-# /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("✅ /start received")
     await update.message.reply_text("👋 Hello! The bot is alive and ready!")
@@ -19,17 +18,16 @@ app.add_handler(CommandHandler("start", start))
 
 # --- Webhook handler ---
 async def handle_webhook(request):
-    try:
-        data = await request.json()
-        print("🔔 Incoming update:", data)
-        update = Update.de_json(data, app.bot)
-        await app.process_update(update)
-    except Exception as e:
-        print("❌ Error in webhook handler:", e)
+    data = await request.json()
+    update = Update.de_json(data, app.bot)
+    await app.process_update(update)
     return web.Response(status=200)
 
 # --- Main startup ---
 async def main():
+    # **Initialize the Application before processing updates**
+    await app.initialize()
+
     webhook_path = "/webhook"
     webhook_url = f"{APP_URL}{webhook_path}"
 
@@ -41,7 +39,7 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", 8000)
     await site.start()
 
-    # Reset and set webhook
+    # Delete any existing webhook and set new one
     await app.bot.delete_webhook()
     await app.bot.set_webhook(url=webhook_url)
 
