@@ -3,3 +3,5 @@ pytesseract
 Pillow
 py7zr
 aiofiles
+aiohttp
+
