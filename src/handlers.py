@@ -2,19 +2,23 @@ import os
 import tempfile
 import asyncio
 import shutil
+import sys
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 from .ocr import process_archive
 
-# --- Logging setup ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", flush=True)
+# --- Logging setup (compatible with Python 3.11) ---
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[handler])
 
 # --- Global state ---
-processing_queue = asyncio.Queue()
 active_jobs = {}  # {chat_id: {"cancel": bool}}
 
+
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles incoming archive uploads."""
     doc = update.message.document
     if not doc:
         return await update.message.reply_text("⚠️ Please send a valid file.")
@@ -36,15 +40,16 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"📦 *{doc.file_name}* received — queued for processing.\n"
-        "⚙️ This might take a minute, but you can still chat or cancel (/cancel).",
+        "⚙️ This might take a minute, but you can still chat or cancel with /cancel.",
         parse_mode="Markdown"
     )
 
-    # Queue it for background processing
+    # Run in background so the bot remains responsive
     asyncio.create_task(worker(update, context, file_path, temp_dir, chat_id))
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels an ongoing OCR process."""
     chat_id = update.effective_chat.id
     if chat_id in active_jobs:
         active_jobs[chat_id]["cancel"] = True
@@ -55,15 +60,20 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def worker(update, context, file_path, temp_dir, chat_id):
-    """Runs OCR job in background while bot stays responsive."""
+    """Performs extraction + OCR in background."""
     try:
         logging.info(f"🚀 Starting OCR job for chat {chat_id} on {file_path}")
         await process_archive(update, context, file_path, temp_dir, active_jobs)
         logging.info(f"✅ OCR job completed for chat {chat_id}")
     except Exception as e:
         logging.error(f"❌ Worker error for chat {chat_id}: {e}")
-        await update.message.reply_text(f"❌ Error during OCR: {e}")
+        try:
+            await update.message.reply_text(f"❌ Error during OCR: {e}")
+        except Exception:
+            pass
     finally:
+        # Clean up
         shutil.rmtree(temp_dir, ignore_errors=True)
         if chat_id in active_jobs:
             del active_jobs[chat_id]
+        logging.info(f"🧹 Cleaned up temp data for chat {chat_id}")
