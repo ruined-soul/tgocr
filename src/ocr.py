@@ -1,9 +1,10 @@
 import os
 import zipfile
 import py7zr
-from PIL import Image
+import html
+from PIL import Image, ImageOps, ImageEnhance, UnidentifiedImageError
 import pytesseract
-from .utils import safe_listdir
+from io import BytesIO
 
 async def process_archive(update, context, archive_path, temp_dir):
     extract_dir = os.path.join(temp_dir, "extracted")
@@ -11,36 +12,27 @@ async def process_archive(update, context, archive_path, temp_dir):
 
     print(f"📂 Extracting archive: {archive_path}")
 
-    # --- Handle different formats ---
-    if archive_path.endswith((".zip", ".cbz")):
-        try:
+    # --- Extract the archive ---
+    try:
+        if archive_path.endswith((".zip", ".cbz")):
             with zipfile.ZipFile(archive_path, "r") as z:
                 z.extractall(extract_dir)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error extracting ZIP/CBZ: {e}")
-            print(f"❌ ZIP/CBZ extract error: {e}")
-            return
-
-    elif archive_path.endswith(".7z"):
-        try:
+        elif archive_path.endswith(".7z"):
             with py7zr.SevenZipFile(archive_path, "r") as z:
                 z.extractall(path=extract_dir)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error extracting 7z archive: {e}")
-            print(f"❌ 7z extract error: {e}")
+        else:
+            await update.message.reply_text("⚠️ Unsupported file format.")
             return
-
-    else:
-        await update.message.reply_text("⚠️ Unsupported file format.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Extraction error: {e}")
+        print(f"❌ Extraction error: {e}")
         return
 
-    # --- List all files recursively ---
+    # --- Collect all images recursively ---
     all_files = []
     for root, _, files in os.walk(extract_dir):
         for f in files:
             all_files.append(os.path.join(root, f))
-
-    print(f"📄 Extracted files ({len(all_files)}): {all_files}")
 
     image_files = [
         f for f in all_files
@@ -49,22 +41,53 @@ async def process_archive(update, context, archive_path, temp_dir):
 
     if not image_files:
         await update.message.reply_text("⚠️ No images found inside the archive.")
-        print("⚠️ No image files detected.")
+        print("⚠️ No images found.")
         return
 
     await update.message.reply_text(f"🔍 Found {len(image_files)} image(s) — starting OCR...")
 
-    # --- OCR each image ---
+    all_text = ""
+
     for idx, img_path in enumerate(sorted(image_files), start=1):
+        filename = os.path.basename(img_path)
         try:
-            img = Image.open(img_path)
-            text = pytesseract.image_to_string(img)
-            text_out = text.strip() or "(No text detected)"
-            filename = os.path.basename(img_path)
-            await update.message.reply_text(
-                f"📄 *{filename}* ({idx}/{len(image_files)}):\n\n{text_out}",
-                parse_mode="Markdown"
+            img = Image.open(img_path).convert("L")  # grayscale
+            img = ImageOps.autocontrast(img)
+            img = ImageEnhance.Contrast(img).enhance(2.0)  # increase contrast
+
+            # Try OCR with multiple configurations
+            text = pytesseract.image_to_string(
+                img,
+                lang="eng",
+                config="--psm 6 --oem 3"
             )
+
+            text = text.strip()
+            text_safe = html.escape(text) if text else "(No text detected)"
+            all_text += f"\n\n--- {filename} ---\n{text_safe}"
+
+            # Send preview for first few pages only
+            if idx <= 3:
+                await update.message.reply_text(
+                    f"📄 {filename} ({idx}/{len(image_files)}):\n\n{text_safe[:3900]}",
+                    parse_mode=None  # avoid Telegram markdown parse errors
+                )
+
+        except UnidentifiedImageError:
+            print(f"⚠️ Skipping invalid image: {img_path}")
         except Exception as e:
-            await update.message.reply_text(f"⚠️ Error reading {os.path.basename(img_path)}: {e}")
             print(f"⚠️ OCR error for {img_path}: {e}")
+            await update.message.reply_text(f"⚠️ Error reading {filename}: {e}")
+
+    # --- Send combined text file ---
+    if all_text.strip():
+        out_path = os.path.join(temp_dir, "OCR_Result.txt")
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(all_text)
+        await update.message.reply_document(
+            document=open(out_path, "rb"),
+            filename="OCR_Result.txt",
+            caption="✅ OCR complete — full text extracted."
+        )
+    else:
+        await update.message.reply_text("⚠️ OCR complete, but no readable text was detected.")
