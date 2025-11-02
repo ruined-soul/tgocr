@@ -1,7 +1,7 @@
 import os
 import asyncio
 from aiohttp import web
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -9,8 +9,9 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from src.handlers import handle_file, worker
+from src.handlers import handle_file, worker, cancel
 
+# --- Environment variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 APP_URL = os.getenv("APP_URL", "").rstrip("/")
 
@@ -30,44 +31,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 Hello {user.first_name or 'there'}!\n\n"
         "I'm your *OCR Bot* — I can extract text from images inside archives.\n\n"
         "📦 *How to use me:*\n"
-        "1️⃣ Send me a `.zip`, `.7z`, or `.cz` file containing images (JPG, PNG, etc.)\n"
+        "1️⃣ Send me a `.zip`, `.7z`, or `.cbz` file containing images (JPG, PNG, etc.)\n"
         "2️⃣ I’ll extract the images and perform OCR on each.\n"
         "3️⃣ I’ll send back the recognized text for every image.\n\n"
-        "Ready? Just send your file now or tap below 👇"
+        "Use /cancel anytime to stop a running task."
     )
 
-    keyboard = [[InlineKeyboardButton("📤 Send File", switch_inline_query_current_chat="")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        welcome_text, parse_mode="Markdown", reply_markup=reply_markup
-    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 
 # --- /help command ---
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🧠 *Help — OCR Bot*\n\n"
-        "Here's what I can do:\n\n"
         "📦 *Supported formats:*\n"
-        "• `.zip` — Standard compressed archives\n"
-        "• `.7z` or `.cz` — High compression formats\n\n"
+        "• `.zip`, `.cbz`, `.7z`\n\n"
         "🖼️ *Supported image types:*\n"
-        "• JPG, PNG, BMP, TIFF\n\n"
+        "• JPG, PNG, BMP, TIFF, WEBP\n\n"
         "📋 *How it works:*\n"
         "1️⃣ You send a supported archive file.\n"
         "2️⃣ I extract and scan all images for text.\n"
-        "3️⃣ I send back the text from each image, one by one.\n\n"
-        "💡 *Tip:* Keep archive sizes small for faster processing."
+        "3️⃣ I send back the text from each image.\n\n"
+        "💡 *Tip:* Use /cancel to stop processing if needed."
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 
-# --- Webhook handler with full logging ---
+# --- Webhook handler ---
 async def handle_webhook(request):
     try:
         data = await request.json()
-        print("📨 Incoming update:", data)  # Log every incoming Telegram update
+        print("📨 Incoming update:", data)
         update = Update.de_json(data, app.bot)
         try:
             await app.process_update(update)
@@ -83,13 +77,11 @@ async def handle_webhook(request):
 async def main():
     print("🚀 Starting OCR Bot initialization...")
 
-    # Initialize Telegram application
     await app.initialize()
 
     webhook_path = "/webhook"
     webhook_url = f"{APP_URL}{webhook_path}"
 
-    # Create aiohttp web server
     web_app = web.Application()
     web_app.router.add_post(webhook_path, handle_webhook)
 
@@ -105,13 +97,14 @@ async def main():
     print(f"✅ Webhook set to {webhook_url}")
     print("🤖 Bot is up and running on port 8000 (Koyeb)")
 
-    # Start OCR background worker
-    asyncio.create_task(worker())
-
     # Register bot handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+
+    # Start background OCR worker
+    asyncio.create_task(worker())
 
     print("📡 Waiting for Telegram updates...")
     await asyncio.Event().wait()
