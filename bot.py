@@ -11,8 +11,18 @@ APP_URL = os.getenv("APP_URL", "").rstrip("/")
 app = Application.builder().token(BOT_TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("✅ /start received")
-    await update.message.reply_text("👋 Hello! The bot is alive and ready!")
+    user = update.effective_user
+    welcome_text = (
+        f"👋 Hello {user.first_name or 'there'}!\n\n"
+        "I'm your *OCR Bot* — I can extract text from images inside archives.\n\n"
+        "📦 *How to use me:*\n"
+        "1️⃣ Send me a `.zip`, `.7z`, or `.cz` file containing images (JPG, PNG, etc.)\n"
+        "2️⃣ I’ll extract the images and perform OCR on each.\n"
+        "3️⃣ I’ll send back the recognized text for every image.\n\n"
+        "Ready? Just send your file now!"
+    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+
 
 app.add_handler(CommandHandler("start", start))
 
