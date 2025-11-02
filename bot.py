@@ -104,7 +104,7 @@ async def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
     # Start background OCR worker
-    asyncio.create_task(worker())
+    # asyncio.create_task(worker())
 
     print("📡 Waiting for Telegram updates...")
     await asyncio.Event().wait()
