@@ -1,10 +1,12 @@
 import os
 import zipfile
 import py7zr
-import html
-from PIL import Image, ImageOps, ImageEnhance, UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError
 import pytesseract
 
+# --- Priority language configuration ---
+# English and Korean first, fallback to Japanese/Chinese if needed
+LANG_PRIORITY = "eng+kor+jpn+chi_sim"
 
 async def process_archive(update, context, archive_path, temp_dir, active_jobs):
     chat_id = update.effective_chat.id
@@ -13,7 +15,6 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
 
     print(f"📂 Extracting archive: {archive_path}")
 
-    # --- Extract archive ---
     try:
         if archive_path.endswith((".zip", ".cbz")):
             with zipfile.ZipFile(archive_path, "r") as z:
@@ -29,28 +30,25 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
         print(f"❌ Extraction error: {e}")
         return
 
-    # --- Gather image files ---
-    all_files = []
+    # --- Collect image files ---
+    image_files = []
     for root, _, files in os.walk(extract_dir):
         for f in files:
-            all_files.append(os.path.join(root, f))
-
-    image_files = [
-        f for f in all_files
-        if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"))
-    ]
+            if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp")):
+                image_files.append(os.path.join(root, f))
 
     if not image_files:
         await update.message.reply_text("⚠️ No images found inside the archive.")
-        print("⚠️ No images found.")
         return
 
-    await update.message.reply_text(f"🔍 Found {len(image_files)} image(s) — starting OCR...")
+    await update.message.reply_text(
+        f"🔍 Found {len(image_files)} image(s). Starting OCR (prioritizing English + Korean)..."
+    )
 
     all_text = ""
 
     for idx, img_path in enumerate(sorted(image_files), start=1):
-        # --- Check for cancel signal ---
+        # --- Check cancel flag ---
         if chat_id in active_jobs and active_jobs[chat_id].get("cancel"):
             await update.message.reply_text("⏹️ OCR cancelled by user.")
             print(f"⏹️ OCR cancelled for chat {chat_id}")
@@ -59,25 +57,25 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
         filename = os.path.basename(img_path)
         try:
             img = Image.open(img_path).convert("L")
-            img = ImageOps.autocontrast(img)
-            img = ImageOps.invert(img)
-            img = ImageEnhance.Contrast(img).enhance(3.0)
-            img = img.point(lambda x: 0 if x < 140 else 255, '1')
 
+            # Light cleanup to improve OCR clarity
+            img = img.point(lambda x: 0 if x < 150 else 255, '1')
+
+            # Perform OCR with prioritized languages
             text = pytesseract.image_to_string(
                 img,
-                lang="eng",
+                lang=LANG_PRIORITY,
                 config="--psm 6 --oem 3"
-            )
+            ).strip()
 
-            text = text.strip()
-            text_safe = html.escape(text) if text else "(No text detected)"
-            all_text += f"\n\n--- {filename} ---\n{text_safe}"
+            if not text:
+                text = "(No text detected)"
+            all_text += f"\n\n--- {filename} ---\n{text}"
 
-            await update.message.reply_text(
-                f"📄 {filename} ({idx}/{len(image_files)}):\n\n{text_safe[:3900]}",
-                parse_mode=None
-            )
+            if idx <= 3:
+                await update.message.reply_text(
+                    f"📄 {filename} ({idx}/{len(image_files)}):\n\n{text[:3900]}"
+                )
 
         except UnidentifiedImageError:
             print(f"⚠️ Skipping invalid image: {img_path}")
@@ -85,7 +83,7 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
             print(f"⚠️ OCR error for {img_path}: {e}")
             await update.message.reply_text(f"⚠️ Error reading {filename}: {e}")
 
-    # --- Send combined text file ---
+    # --- Send combined output ---
     if all_text.strip():
         out_path = os.path.join(temp_dir, "OCR_Result.txt")
         with open(out_path, "w", encoding="utf-8") as f:
@@ -93,7 +91,7 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
         await update.message.reply_document(
             document=open(out_path, "rb"),
             filename="OCR_Result.txt",
-            caption="✅ OCR complete — full text extracted."
+            caption="✅ OCR complete (prioritizing English + Korean)."
         )
     else:
         await update.message.reply_text("⚠️ OCR complete, but no readable text was detected.")
