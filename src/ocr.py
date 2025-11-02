@@ -4,7 +4,7 @@ import py7zr
 import html
 from PIL import Image, ImageOps, ImageEnhance, UnidentifiedImageError
 import pytesseract
-from io import BytesIO
+
 
 async def process_archive(update, context, archive_path, temp_dir):
     extract_dir = os.path.join(temp_dir, "extracted")
@@ -51,11 +51,12 @@ async def process_archive(update, context, archive_path, temp_dir):
     for idx, img_path in enumerate(sorted(image_files), start=1):
         filename = os.path.basename(img_path)
         try:
-            img = Image.open(img_path).convert("L")  # grayscale
+            img = Image.open(img_path).convert("L")
             img = ImageOps.autocontrast(img)
-            img = ImageEnhance.Contrast(img).enhance(2.0)  # increase contrast
+            img = ImageOps.invert(img)
+            img = ImageEnhance.Contrast(img).enhance(3.0)
+            img = img.point(lambda x: 0 if x < 140 else 255, '1')
 
-            # Try OCR with multiple configurations
             text = pytesseract.image_to_string(
                 img,
                 lang="eng",
@@ -66,12 +67,10 @@ async def process_archive(update, context, archive_path, temp_dir):
             text_safe = html.escape(text) if text else "(No text detected)"
             all_text += f"\n\n--- {filename} ---\n{text_safe}"
 
-            # Send preview for first few pages only
-            if idx <= 3:
-                await update.message.reply_text(
-                    f"📄 {filename} ({idx}/{len(image_files)}):\n\n{text_safe[:3900]}",
-                    parse_mode=None  # avoid Telegram markdown parse errors
-                )
+            await update.message.reply_text(
+                f"📄 {filename} ({idx}/{len(image_files)}):\n\n{text_safe[:3900]}",
+                parse_mode=None
+            )
 
         except UnidentifiedImageError:
             print(f"⚠️ Skipping invalid image: {img_path}")
