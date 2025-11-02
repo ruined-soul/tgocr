@@ -16,10 +16,10 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("⚠️ Please send a valid file.")
 
     name = doc.file_name.lower()
-    if not any(name.endswith(ext) for ext in (".zip", ".7z", ".cz")):
+    if not any(name.endswith(ext) for ext in (".zip", ".7z", ".cbz")):
         return await update.message.reply_text(
             "⚠️ Unsupported file type.\n\n"
-            "Please send a `.zip`, `.7z`, or `.cz` archive containing images."
+            "Please send a `.zip`, `.cbz`, or `.7z` archive containing images."
         )
 
     temp_dir = tempfile.mkdtemp()
@@ -44,6 +44,7 @@ async def worker():
             await process_archive(update, context, file_path, temp_dir)
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
+            print(f"❌ Worker error: {e}")
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
             processing_queue.task_done()
