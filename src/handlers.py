@@ -17,7 +17,10 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     name = doc.file_name.lower()
     if not any(name.endswith(ext) for ext in (".zip", ".7z", ".cz")):
-        return await update.message.reply_text("⚠️ Supported formats: .zip, .7z, .cz")
+        return await update.message.reply_text(
+            "⚠️ Unsupported file type.\n\n"
+            "Please send a `.zip`, `.7z`, or `.cz` archive containing images."
+        )
 
     temp_dir = tempfile.mkdtemp()
     file_path = os.path.join(temp_dir, name)
@@ -26,7 +29,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"📦 *{doc.file_name}* received — added to the processing queue.\n"
-        "⏳ Please wait while I work on it...",
+        "⏳ Please wait while I process it...",
         parse_mode="Markdown"
     )
 
