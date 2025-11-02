@@ -6,9 +6,9 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from .ocr import process_archive
 
-# Queues and cancellation
+# Queues and job tracking
 processing_queue = asyncio.Queue()
-cancelled_jobs = set()
+active_jobs = {}      # chat_id -> cancellation flag
 
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -28,6 +28,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(doc.file_id)
     await file.download_to_drive(file_path)
 
+    chat_id = update.effective_chat.id
+    active_jobs[chat_id] = {"cancel": False}
+
     await update.message.reply_text(
         f"📦 *{doc.file_name}* received — added to the processing queue.\n"
         "⏳ Please wait while I process it...",
@@ -42,26 +45,26 @@ async def worker():
     while True:
         update, context, file_path, temp_dir = await processing_queue.get()
         chat_id = update.effective_chat.id
-
-        if chat_id in cancelled_jobs:
-            await update.message.reply_text("❌ Processing cancelled.")
-            cancelled_jobs.remove(chat_id)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            processing_queue.task_done()
-            continue
-
         try:
-            await process_archive(update, context, file_path, temp_dir)
+            if chat_id not in active_jobs:
+                active_jobs[chat_id] = {"cancel": False}
+
+            await process_archive(update, context, file_path, temp_dir, active_jobs)
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
             print(f"❌ Worker error: {e}")
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
             processing_queue.task_done()
+            if chat_id in active_jobs:
+                del active_jobs[chat_id]
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel the current OCR task for the user."""
+    """Cancel the current OCR task immediately."""
     chat_id = update.effective_chat.id
-    cancelled_jobs.add(chat_id)
-    await update.message.reply_text("🛑 Cancel request received. Stopping your current OCR task...")
+    if chat_id in active_jobs:
+        active_jobs[chat_id]["cancel"] = True
+        await update.message.reply_text("🛑 Cancel request received. Stopping OCR now...")
+    else:
+        await update.message.reply_text("⚠️ No active OCR process to cancel.")
