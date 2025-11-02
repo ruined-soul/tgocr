@@ -2,14 +2,17 @@ import os
 import tempfile
 import asyncio
 import shutil
+import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 from .ocr import process_archive
 
-# Queues and job tracking
-processing_queue = asyncio.Queue()
-active_jobs = {}      # chat_id -> cancellation flag
+# --- Logging setup ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", flush=True)
 
+# --- Global state ---
+processing_queue = asyncio.Queue()
+active_jobs = {}  # {chat_id: {"cancel": bool}}
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
@@ -19,12 +22,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = doc.file_name.lower()
     if not any(name.endswith(ext) for ext in (".zip", ".7z", ".cbz")):
         return await update.message.reply_text(
-            "⚠️ Unsupported file type.\n\n"
-            "Please send a `.zip`, `.cbz`, or `.7z` archive containing images."
+            "⚠️ Unsupported file type.\n\nPlease send a `.zip`, `.cbz`, or `.7z` archive containing images."
         )
 
     temp_dir = tempfile.mkdtemp()
     file_path = os.path.join(temp_dir, name)
+
     file = await context.bot.get_file(doc.file_id)
     await file.download_to_drive(file_path)
 
@@ -32,39 +35,35 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_jobs[chat_id] = {"cancel": False}
 
     await update.message.reply_text(
-        f"📦 *{doc.file_name}* received — added to the processing queue.\n"
-        "⏳ Please wait while I process it...",
+        f"📦 *{doc.file_name}* received — queued for processing.\n"
+        "⚙️ This might take a minute, but you can still chat or cancel (/cancel).",
         parse_mode="Markdown"
     )
 
-    await processing_queue.put((update, context, file_path, temp_dir))
-
-
-async def worker():
-    """Background task that processes queued OCR jobs sequentially."""
-    while True:
-        update, context, file_path, temp_dir = await processing_queue.get()
-        chat_id = update.effective_chat.id
-        try:
-            if chat_id not in active_jobs:
-                active_jobs[chat_id] = {"cancel": False}
-
-            await process_archive(update, context, file_path, temp_dir, active_jobs)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
-            print(f"❌ Worker error: {e}")
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            processing_queue.task_done()
-            if chat_id in active_jobs:
-                del active_jobs[chat_id]
+    # Queue it for background processing
+    asyncio.create_task(worker(update, context, file_path, temp_dir, chat_id))
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel the current OCR task immediately."""
     chat_id = update.effective_chat.id
     if chat_id in active_jobs:
         active_jobs[chat_id]["cancel"] = True
-        await update.message.reply_text("🛑 Cancel request received. Stopping OCR now...")
+        await update.message.reply_text("🛑 Cancel request received. Stopping your current OCR task...")
+        logging.info(f"🛑 Cancel flag set for chat {chat_id}")
     else:
-        await update.message.reply_text("⚠️ No active OCR process to cancel.")
+        await update.message.reply_text("⚠️ You don’t have any active OCR process.")
+
+
+async def worker(update, context, file_path, temp_dir, chat_id):
+    """Runs OCR job in background while bot stays responsive."""
+    try:
+        logging.info(f"🚀 Starting OCR job for chat {chat_id} on {file_path}")
+        await process_archive(update, context, file_path, temp_dir, active_jobs)
+        logging.info(f"✅ OCR job completed for chat {chat_id}")
+    except Exception as e:
+        logging.error(f"❌ Worker error for chat {chat_id}: {e}")
+        await update.message.reply_text(f"❌ Error during OCR: {e}")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        if chat_id in active_jobs:
+            del active_jobs[chat_id]
