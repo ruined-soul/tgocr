@@ -6,16 +6,8 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from .ocr import process_archive
 
+# Queue to manage incoming OCR jobs
 processing_queue = asyncio.Queue()
-
-
-async def start(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "👋 *Welcome to OCR Bot!*\n\n"
-        "Send me a `.zip`, `.7z`, or `.cz` file containing images.\n"
-        "I'll extract and scan them for text, then send results one by one."
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -32,11 +24,17 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(doc.file_id)
     await file.download_to_drive(file_path)
 
-    await update.message.reply_text("📦 File received — added to processing queue.")
+    await update.message.reply_text(
+        f"📦 *{doc.file_name}* received — added to the processing queue.\n"
+        "⏳ Please wait while I work on it...",
+        parse_mode="Markdown"
+    )
+
     await processing_queue.put((update, context, file_path, temp_dir))
 
 
 async def worker():
+    """Background task that processes queued OCR jobs sequentially."""
     while True:
         update, context, file_path, temp_dir = await processing_queue.get()
         try:
