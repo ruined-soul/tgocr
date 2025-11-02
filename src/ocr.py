@@ -6,13 +6,14 @@ from PIL import Image, ImageOps, ImageEnhance, UnidentifiedImageError
 import pytesseract
 
 
-async def process_archive(update, context, archive_path, temp_dir):
+async def process_archive(update, context, archive_path, temp_dir, active_jobs):
+    chat_id = update.effective_chat.id
     extract_dir = os.path.join(temp_dir, "extracted")
     os.makedirs(extract_dir, exist_ok=True)
 
     print(f"📂 Extracting archive: {archive_path}")
 
-    # --- Extract the archive ---
+    # --- Extract archive ---
     try:
         if archive_path.endswith((".zip", ".cbz")):
             with zipfile.ZipFile(archive_path, "r") as z:
@@ -28,7 +29,7 @@ async def process_archive(update, context, archive_path, temp_dir):
         print(f"❌ Extraction error: {e}")
         return
 
-    # --- Collect all images recursively ---
+    # --- Gather image files ---
     all_files = []
     for root, _, files in os.walk(extract_dir):
         for f in files:
@@ -49,6 +50,12 @@ async def process_archive(update, context, archive_path, temp_dir):
     all_text = ""
 
     for idx, img_path in enumerate(sorted(image_files), start=1):
+        # --- Check for cancel signal ---
+        if chat_id in active_jobs and active_jobs[chat_id].get("cancel"):
+            await update.message.reply_text("⏹️ OCR cancelled by user.")
+            print(f"⏹️ OCR cancelled for chat {chat_id}")
+            return
+
         filename = os.path.basename(img_path)
         try:
             img = Image.open(img_path).convert("L")
