@@ -12,6 +12,7 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
 
     logging.info(f"📂 Extracting archive: {archive_path}")
 
+    # --- Extract the archive ---
     try:
         if archive_path.endswith((".zip", ".cbz")):
             with zipfile.ZipFile(archive_path, "r") as z:
@@ -27,6 +28,7 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
         logging.error(f"❌ Extraction error: {e}")
         return
 
+    # --- Find image files ---
     image_files = []
     for root, _, files in os.walk(extract_dir):
         for f in files:
@@ -54,6 +56,7 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
             text_out = text.strip() or "(No text detected)"
             all_text += f"\n\n--- {filename} ---\n{text_out}"
 
+            # Send preview for first few images
             if idx <= 3:
                 await update.message.reply_text(
                     f"📄 *{filename}* ({idx}/{len(image_files)}):\n\n{text_out}",
@@ -62,7 +65,7 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
 
                 if idx == 3:
                     await update.message.reply_text(
-                        "🕐 Please wait — we’re still processing the remaining images. "
+                        "🕐 Please wait — still processing remaining images. "
                         "You’ll receive the full result file soon."
                     )
 
@@ -72,14 +75,21 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
             logging.error(f"⚠️ OCR error for {img_path}: {e}")
             await update.message.reply_text(f"⚠️ Error reading {filename}: {e}")
 
+    # --- Save and send the result file ---
     if all_text.strip():
-        out_path = os.path.join(temp_dir, "OCR_Result.txt")
+        # Use same name as original archive, but with .txt extension
+        base_name = os.path.splitext(os.path.basename(archive_path))[0]
+        result_filename = f"{base_name}.txt"
+        out_path = os.path.join(temp_dir, result_filename)
+
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(all_text)
+
         await update.message.reply_document(
             document=open(out_path, "rb"),
-            filename="OCR_Result.txt",
-            caption="✅ OCR complete — full text extracted."
+            filename=result_filename,
+            caption=f"✅ OCR complete — full text extracted from *{base_name}*.",
+            parse_mode="Markdown"
         )
     else:
         await update.message.reply_text("⚠️ OCR complete, but no readable text was detected.")
