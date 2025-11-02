@@ -14,6 +14,11 @@ from src.handlers import handle_file, worker
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 APP_URL = os.getenv("APP_URL", "").rstrip("/")
 
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN environment variable is missing.")
+if not APP_URL:
+    raise ValueError("❌ APP_URL environment variable is missing.")
+
 # --- Define the bot ---
 app = Application.builder().token(BOT_TOKEN).build()
 
@@ -31,12 +36,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Ready? Just send your file now or tap below 👇"
     )
 
-    keyboard = [
-        [InlineKeyboardButton("📤 Send File", switch_inline_query_current_chat="")]
-    ]
+    keyboard = [[InlineKeyboardButton("📤 Send File", switch_inline_query_current_chat="")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=reply_markup)
+    await update.message.reply_text(
+        welcome_text, parse_mode="Markdown", reply_markup=reply_markup
+    )
 
 
 # --- /help command ---
@@ -58,22 +63,33 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
 
-# --- Webhook handler ---
+# --- Webhook handler with full logging ---
 async def handle_webhook(request):
-    data = await request.json()
-    update = Update.de_json(data, app.bot)
-    await app.process_update(update)
-    return web.Response(status=200)
+    try:
+        data = await request.json()
+        print("📨 Incoming update:", data)  # Log every incoming Telegram update
+        update = Update.de_json(data, app.bot)
+        try:
+            await app.process_update(update)
+        except Exception as e:
+            print("❌ Error while processing update:", e)
+        return web.Response(status=200)
+    except Exception as e:
+        print("❌ Failed to parse webhook request:", e)
+        return web.Response(status=400)
 
 
 # --- Main startup ---
 async def main():
-    # Initialize app before processing updates
+    print("🚀 Starting OCR Bot initialization...")
+
+    # Initialize Telegram application
     await app.initialize()
 
     webhook_path = "/webhook"
     webhook_url = f"{APP_URL}{webhook_path}"
 
+    # Create aiohttp web server
     web_app = web.Application()
     web_app.router.add_post(webhook_path, handle_webhook)
 
@@ -82,23 +98,27 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", 8000)
     await site.start()
 
-    # Delete old webhook and set new one
-    await app.bot.delete_webhook()
+    print("🌍 Setting Telegram webhook...")
+    await app.bot.delete_webhook(drop_pending_updates=True)
     await app.bot.set_webhook(url=webhook_url)
 
-    print(f"🌐 Webhook set to {webhook_url}")
-    print("🤖 Bot running on port 8000")
+    print(f"✅ Webhook set to {webhook_url}")
+    print("🤖 Bot is up and running on port 8000 (Koyeb)")
 
-    # Start background OCR worker
+    # Start OCR background worker
     asyncio.create_task(worker())
 
-    # Add handlers
+    # Register bot handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
+    print("📡 Waiting for Telegram updates...")
     await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print("💥 Fatal startup error:", e)
