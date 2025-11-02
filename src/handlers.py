@@ -6,8 +6,9 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from .ocr import process_archive
 
-# Queue to manage incoming OCR jobs
+# Queues and cancellation
 processing_queue = asyncio.Queue()
+cancelled_jobs = set()
 
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -40,6 +41,15 @@ async def worker():
     """Background task that processes queued OCR jobs sequentially."""
     while True:
         update, context, file_path, temp_dir = await processing_queue.get()
+        chat_id = update.effective_chat.id
+
+        if chat_id in cancelled_jobs:
+            await update.message.reply_text("❌ Processing cancelled.")
+            cancelled_jobs.remove(chat_id)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            processing_queue.task_done()
+            continue
+
         try:
             await process_archive(update, context, file_path, temp_dir)
         except Exception as e:
@@ -48,3 +58,10 @@ async def worker():
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
             processing_queue.task_done()
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the current OCR task for the user."""
+    chat_id = update.effective_chat.id
+    cancelled_jobs.add(chat_id)
+    await update.message.reply_text("🛑 Cancel request received. Stopping your current OCR task...")
