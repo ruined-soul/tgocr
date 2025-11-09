@@ -58,7 +58,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
 
-            # Limit file size to avoid hitting free-tier limits
             if len(content) > 15000:
                 await update.message.reply_text(
                     "⚠️ File too large for translation (>15 KB). Please send a smaller `.txt` file."
@@ -161,9 +160,18 @@ async def image_worker(update, context, image_path, temp_dir, chat_id):
 # ============================================================
 def chunk_text_lines(text: str, batch_size: int = 5):
     """Split text into small batches of lines (preserving blank lines)."""
-    lines = text.splitlines()  # keep formatting (blank lines too)
+    lines = text.splitlines()
     for i in range(0, len(lines), batch_size):
         yield lines[i:i + batch_size]
+
+
+def make_progress_bar(current: int, total: int, length: int = 12) -> str:
+    """Generate a textual progress bar."""
+    filled = int(length * current / total)
+    empty = length - filled
+    bar = "█" * filled + "░" * empty
+    percent = int((current / total) * 100)
+    return f"[{bar}] {percent}% ({current}/{total})"
 
 
 async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,27 +190,29 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# 📄 TRANSLATION HELPER — OUTPUT AS .TXT
+# 📄 TRANSLATION HELPER — OUTPUT AS .TXT (with progress bar)
 # ============================================================
 async def translate_txt_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, file_name: str = None):
     """Translate text content (from /translate or .txt file) and return a .txt file."""
-    wait_msg = await update.message.reply_text("⏳ Starting translation...")
+    progress_msg = await update.message.reply_text("⏳ Preparing translation...")
 
-    # Split text into smaller batches (for long files)
     batches = list(chunk_text_lines(text, batch_size=5))
     total_batches = len(batches)
     translated_batches = []
 
-    await wait_msg.edit_text(f"📦 Found {total_batches} batches. Translating to Hinglish...")
+    await progress_msg.edit_text(f"📦 Found {total_batches} batches. Starting translation...")
 
     for idx, batch in enumerate(batches, start=1):
         batch_text = "\n".join(batch)
         translated = translate_to_hinglish(batch_text)
         translated_batches.append(translated)
 
-        # Optional progress message
-        if idx % 4 == 0 or idx == total_batches:
-            await update.message.reply_text(f"📝 Completed batch {idx}/{total_batches}...")
+        # --- Update progress bar in one message ---
+        bar = make_progress_bar(idx, total_batches)
+        try:
+            await progress_msg.edit_text(f"📝 Translating... {bar}")
+        except Exception:
+            pass
 
         await asyncio.sleep(1.0)
 
@@ -217,10 +227,12 @@ async def translate_txt_content(update: Update, context: ContextTypes.DEFAULT_TY
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(full_translation)
 
+    await progress_msg.edit_text("✅ Translation complete! Preparing file...")
+
     await update.message.reply_document(
         document=open(out_path, "rb"),
         filename=output_name,
-        caption="📜 Hinglish Translation (preserving original formatting)"
+        caption="📜 Hinglish Translation (original formatting preserved)"
     )
 
     try:
@@ -228,4 +240,4 @@ async def translate_txt_content(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         pass
 
-    await update.message.reply_text("🎉 Translation completed successfully!")
+    await progress_msg.edit_text("🎉 Translation completed successfully!")
