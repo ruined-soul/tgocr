@@ -7,8 +7,9 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 from .ocr import process_archive
+from .translate import translate_to_hinglish  # ✅ New import
 
-# --- Logging setup (compatible with Python 3.11) ---
+# --- Logging setup ---
 handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logging.basicConfig(level=logging.INFO, handlers=[handler])
@@ -44,7 +45,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-    # Run in background so the bot remains responsive
+    # Run in background
     asyncio.create_task(worker(update, context, file_path, temp_dir, chat_id))
 
 
@@ -72,8 +73,43 @@ async def worker(update, context, file_path, temp_dir, chat_id):
         except Exception:
             pass
     finally:
-        # Clean up
         shutil.rmtree(temp_dir, ignore_errors=True)
         if chat_id in active_jobs:
             del active_jobs[chat_id]
         logging.info(f"🧹 Cleaned up temp data for chat {chat_id}")
+
+
+# --- New: Translation Command ---
+async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Translates English dialogues to Hinglish using Gemini."""
+    text = " ".join(context.args) if context.args else None
+
+    # If no text argument, allow replying to another message
+    if not text and update.message.reply_to_message:
+        text = update.message.reply_to_message.text or update.message.reply_to_message.caption
+
+    if not text:
+        return await update.message.reply_text(
+            "💬 Use `/translate <text>` or reply to a message to translate it.",
+            parse_mode="Markdown"
+        )
+
+    wait_msg = await update.message.reply_text("⏳ Translating your dialogues, please wait...")
+
+    translated = translate_to_hinglish(text)
+
+    if translated.startswith("⚠️"):
+        await wait_msg.edit_text(translated)
+        return
+
+    if len(translated) > 4000:
+        with open("translation.txt", "w", encoding="utf-8") as f:
+            f.write(translated)
+        await wait_msg.delete()
+        await update.message.reply_document(
+            "translation.txt", caption="📜 Hinglish Translation (File Version)"
+        )
+    else:
+        await wait_msg.edit_text(
+            f"📜 *Hinglish Translation:*\n\n{translated}", parse_mode="Markdown"
+        )
