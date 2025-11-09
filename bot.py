@@ -10,15 +10,9 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from src.handlers import (
-    handle_file,
-    handle_image,
-    worker,
-    cancel,
-    translate_command,
-    set_ocr_mode,
-)
+from src.handlers import handle_file, worker, cancel, translate_command, handle_image
 
+# --- Environment variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 APP_URL = os.getenv("APP_URL", "").rstrip("/")
 
@@ -27,44 +21,58 @@ if not BOT_TOKEN:
 if not APP_URL:
     raise ValueError("❌ APP_URL environment variable is missing.")
 
+# --- Define the bot ---
 app = Application.builder().token(BOT_TOKEN).build()
+
 
 # ============================================================
 # 🚀 COMMANDS
 # ============================================================
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome message."""
     user = update.effective_user
     welcome_text = (
         f"👋 Hello {user.first_name or 'there'}!\n\n"
-        "I'm your **OCR + Hinglish Translation Bot**.\n\n"
-        "📦 *OCR:* Send me a `.zip`, `.7z`, or image to extract text.\n"
-        "💬 *Translate:* Use `/translate <text>` for Hinglish.\n\n"
-        "🔄 *Modes:*\n"
-        "• `/ocrmode tesseract` — Local OCR\n"
-        "• `/ocrmode online` — OnlineOCR.net API"
+        "I'm your **OCR + Hinglish Translation Bot**. Here's what I can do:\n\n"
+        "📦 *1. OCR Extraction:*\n"
+        "→ Send me a `.zip`, `.cbz`, or `.7z` file containing images (manga/manhwa pages).\n"
+        "→ I'll extract and read the English dialogues from each image.\n\n"
+        "🖼️ *Also:* Send single images (JPEG/PNG/WEBP) and I'll OCR them directly.\n\n"
+        "💬 *2. Hinglish Translation:*\n"
+        "→ Use `/translate <text>` or reply to any English text with `/translate`.\n"
+        "→ I’ll translate it into natural, casual Hinglish — in small batches for best quality.\n\n"
+        "✨ Try sending me a few dialogues or an image now!"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Help guide."""
     help_text = (
         "🧠 *Help — OCR + Hinglish Bot*\n\n"
-        "📦 **OCR Options:**\n"
-        "• `/ocrmode tesseract` — Use local Tesseract OCR\n"
-        "• `/ocrmode online` — Use OnlineOCR.net API\n\n"
-        "💬 **Translate:**\n"
-        "Use `/translate <text>` or reply to text to translate."
+        "📦 **For OCR (archives):**\n"
+        "Send a `.zip`, `.cbz`, or `.7z` archive containing image pages.\n"
+        "I'll extract and read the text from all images automatically.\n\n"
+        "🖼️ **For single images:**\n"
+        "Send a photo (JPEG, PNG, WEBP, etc.) and I'll OCR it and return the text.\n\n"
+        "💬 **For Translation:**\n"
+        "Use `/translate <text>` — or reply to any message with `/translate`.\n"
+        "I’ll translate it into Hinglish (Hindi + English mix).\n\n"
+        "📋 *Commands:*\n"
+        "• `/translate` — Translate text to Hinglish\n"
+        "• `/cancel` — Cancel any ongoing OCR task\n"
+        "• `/help` — Show this message again"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
+
 
 # ============================================================
 # 🌐 WEBHOOK HANDLER
 # ============================================================
-
 async def handle_webhook(request):
     try:
         data = await request.json()
+        print("📨 Incoming update:", data)
         update = Update.de_json(data, app.bot)
         await app.process_update(update)
         return web.Response(status=200)
@@ -72,12 +80,13 @@ async def handle_webhook(request):
         print("❌ Webhook error:", e)
         return web.Response(status=400)
 
+
 # ============================================================
 # 🏁 MAIN STARTUP
 # ============================================================
-
 async def main():
     print("🚀 Starting OCR + Translation Bot...")
+
     await app.initialize()
 
     webhook_path = "/webhook"
@@ -94,19 +103,19 @@ async def main():
     await app.bot.delete_webhook(drop_pending_updates=True)
     await app.bot.set_webhook(url=webhook_url)
 
+    print(f"✅ Webhook set to {webhook_url}")
+    print("🤖 Bot is up and running!")
+
     # Register handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("translate", translate_command))
-    app.add_handler(CommandHandler("ocrmode", set_ocr_mode))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-
-    print(f"✅ Webhook set to {webhook_url}")
-    print("🤖 Bot is up and running!")
+    app.add_handler(MessageHandler(filters.PHOTO, handle_image))  # new: handle photos
 
     await asyncio.Event().wait()
+
 
 if __name__ == "__main__":
     try:
