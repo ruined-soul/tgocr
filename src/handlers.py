@@ -7,7 +7,7 @@ import sys
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
-from .ocr import process_archive
+from .ocr import process_archive, process_single_image
 from .translate import translate_to_hinglish
 
 # --- Logging setup ---
@@ -20,9 +20,8 @@ active_jobs = {}  # {chat_id: {"cancel": bool}}
 
 
 # ============================================================
-# 📦 OCR HANDLING
+# 📦 OCR HANDLING (archives)
 # ============================================================
-
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles incoming archive uploads."""
     doc = update.message.document
@@ -50,6 +49,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+    # Run archive processing in background
     asyncio.create_task(worker(update, context, file_path, temp_dir, chat_id))
 
 
@@ -65,7 +65,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def worker(update, context, file_path, temp_dir, chat_id):
-    """Performs extraction + OCR in background."""
+    """Performs extraction + OCR in background for archives."""
     try:
         logging.info(f"🚀 Starting OCR job for chat {chat_id} on {file_path}")
         await process_archive(update, context, file_path, temp_dir, active_jobs)
@@ -84,9 +84,54 @@ async def worker(update, context, file_path, temp_dir, chat_id):
 
 
 # ============================================================
+# 🖼️ SINGLE IMAGE HANDLING
+# ============================================================
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles single image uploads (photo messages) for OCR."""
+    # Telegram photo sizes are provided in increasing order; take the largest
+    if not update.message.photo:
+        return await update.message.reply_text("⚠️ No photo found in the message.")
+
+    photo = update.message.photo[-1]  # highest resolution
+    file = await context.bot.get_file(photo.file_id)
+
+    temp_dir = tempfile.mkdtemp()
+    # Keep original extension if available, default to .jpg
+    image_path = os.path.join(temp_dir, "uploaded_image.jpg")
+    await file.download_to_drive(image_path)
+
+    chat_id = update.effective_chat.id
+    active_jobs[chat_id] = {"cancel": False}
+
+    await update.message.reply_text("🖼️ Image received — queued for OCR...")
+
+    # Run single-image OCR in background to avoid blocking webhook processing
+    asyncio.create_task(image_worker(update, context, image_path, temp_dir, chat_id))
+
+
+async def image_worker(update, context, image_path, temp_dir, chat_id):
+    """Background worker for single-image OCR."""
+    try:
+        logging.info(f"🚀 Starting single-image OCR for chat {chat_id} on {image_path}")
+        # process_single_image handles sending results/messages
+        await process_single_image(update, context, image_path, active_jobs)
+        logging.info(f"✅ Single-image OCR completed for chat {chat_id}")
+    except Exception as e:
+        logging.error(f"❌ Image worker error for chat {chat_id}: {e}")
+        try:
+            await update.message.reply_text(f"❌ Error during image OCR: {e}")
+        except Exception:
+            pass
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        if chat_id in active_jobs:
+            del active_jobs[chat_id]
+        logging.info(f"🧹 Cleaned up image temp data for chat {chat_id}")
+
+
+# ============================================================
 # 💬 TRANSLATION COMMAND (Batch version)
 # ============================================================
-
 def chunk_text_lines(text: str, batch_size: int = 5):
     """Split text into small batches of lines."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
