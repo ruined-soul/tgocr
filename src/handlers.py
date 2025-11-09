@@ -138,3 +138,16 @@ async def translate_txt(update: Update, text: str, filename: str):
 
     await update.message.reply_document(open(output_name, "rb"), caption=f"✅ Translation complete: {output_name}")
     os.remove(output_name)
+
+# ============================================================
+# 🛑 CANCEL ACTIVE JOB
+# ============================================================
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel any running OCR job for this chat."""
+    chat_id = update.effective_chat.id
+    if chat_id in active_jobs:
+        active_jobs[chat_id]["cancel"] = True
+        await update.message.reply_text("🛑 OCR process cancelled.")
+    else:
+        await update.message.reply_text("⚠️ No active OCR process to cancel.")
