@@ -1,3 +1,4 @@
+# /src/ocr.py
 import os
 import zipfile
 import py7zr
@@ -93,3 +94,47 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
         )
     else:
         await update.message.reply_text("⚠️ OCR complete, but no readable text was detected.")
+
+
+# ============================================================
+# Single-image OCR helper
+# ============================================================
+async def process_single_image(update, context, image_path, active_jobs=None):
+    """
+    Run OCR on a single image and send extracted text back to the user.
+    active_jobs can be provided (dict) to allow cancellation if needed.
+    """
+    chat_id = update.effective_chat.id
+    try:
+        # Check cancel (if active_jobs provided)
+        if active_jobs and chat_id in active_jobs and active_jobs[chat_id].get("cancel"):
+            await update.message.reply_text("🛑 OCR cancelled before start.")
+            return
+
+        img = Image.open(image_path)
+        text = pytesseract.image_to_string(img).strip()
+        if not text:
+            text = "(No readable text found)"
+
+        # Respect Telegram message size; if big, send as file
+        if len(text) > 3500:
+            out_path = image_path + ".txt"
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            await update.message.reply_document(
+                document=open(out_path, "rb"),
+                filename=os.path.basename(out_path),
+                caption="📄 OCR result (full text)"
+            )
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+        else:
+            await update.message.reply_text(f"📄 *Extracted Text:*\n\n{text}", parse_mode="Markdown")
+
+    except UnidentifiedImageError:
+        await update.message.reply_text("⚠️ Invalid image file — couldn’t read.")
+    except Exception as e:
+        logging.error(f"❌ process_single_image error: {e}")
+        await update.message.reply_text(f"❌ OCR error: {e}")
