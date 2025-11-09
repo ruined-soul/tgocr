@@ -1,206 +1,243 @@
+# /src/handlers.py
 import os
-import asyncio
 import tempfile
-import zipfile
-import aiohttp
-import pytesseract
-from PIL import Image
-from google import genai
+import asyncio
+import shutil
+import sys
+import logging
 from telegram import Update
 from telegram.ext import ContextTypes
+from .ocr import process_archive, process_single_image
+from .translate import translate_to_hinglish
 
-# -------------------------------
-# 🌐 Environment and Config
-# -------------------------------
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-client = genai.Client(api_key=GEMINI_API_KEY)
+# --- Logging setup ---
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[handler])
 
-MODEL_NAME = "gemini-2.5-flash"
-STYLE_GUIDE = (
-    "Translate text into natural Hinglish (Roman Hindi). Keep tone conversational, "
-    "preserve meaning, and avoid literal translation. Example: 'What are you doing?' → 'Tu kya kar raha hai?'"
-)
+# --- Global state ---
+active_jobs = {}  # {chat_id: {"cancel": bool}}
 
-# Dictionary to track user jobs (for /cancel)
-active_jobs = {}
 
-# -------------------------------
-# 🧠 Safe Message Sending (to avoid Markdown errors)
-# -------------------------------
-async def safe_send_message(bot, chat_id, text, **kwargs):
-    """Safely send message with Markdown fallback."""
-    try:
-        await bot.send_message(chat_id, text, **kwargs)
-    except Exception:
-        # Retry without parse_mode if Telegram markdown fails
-        await bot.send_message(chat_id, text, parse_mode=None)
-
-# -------------------------------
-# 🚀 Gemini Translation
-# -------------------------------
-def translate_to_hinglish_sync(text: str) -> str:
-    """Blocking Gemini API translation (to run in background thread)."""
-    try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=[
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "text": f"{STYLE_GUIDE}\n\nTranslate the following text:\n{text}"
-                        }
-                    ],
-                }
-            ],
-        )
-        return response.text.strip() if response and response.text else "(No translation output)"
-    except Exception as e:
-        return f"⚠️ Translation failed: {e}"
-
-async def translate_to_hinglish(text: str) -> str:
-    """Async wrapper to avoid blocking event loop."""
-    return await asyncio.to_thread(translate_to_hinglish_sync, text)
-
-# -------------------------------
-# 🏁 Command Handlers
-# -------------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Welcome! Send me a photo, scanned page, or ZIP file for OCR + Hinglish translation.\n"
-        "Use /cancel to stop a running job."
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📘 *Available Commands:*\n"
-        "/start - Welcome message\n"
-        "/help - Show this message\n"
-        "/cancel - Cancel running OCR/translation\n\n"
-        "📄 *Usage:*\n"
-        "• Send an image or ZIP file — I’ll extract the text and translate it into Hinglish.",
-        parse_mode="Markdown",
-    )
-
-# -------------------------------
-# ❌ Cancel Command
-# -------------------------------
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel current OCR/translation for the user."""
-    user_id = update.effective_user.id
-    if user_id in active_jobs:
-        job_task = active_jobs.pop(user_id)
-        if not job_task.done():
-            job_task.cancel()
-            await update.message.reply_text("❌ OCR/Translation cancelled successfully.")
-        else:
-            await update.message.reply_text("⚠️ Task already completed.")
-    else:
-        await update.message.reply_text("⚠️ No active OCR/Translation to cancel.")
-
-# -------------------------------
-# 🖼️ Handle Image Upload
-# -------------------------------
-async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
-
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        await file.download_to_drive(custom_path=tmp.name)
-        image_path = tmp.name
-
-    status_msg = await update.message.reply_text("🕵️ Running OCR... please wait.")
-    active_jobs[user_id] = asyncio.current_task()
-
-    try:
-        ocr_text = pytesseract.image_to_string(Image.open(image_path))
-        translated = await translate_to_hinglish(ocr_text)
-
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            f"📜 *Extracted Text:*\n\n{ocr_text.strip() or '(No text found)'}",
-            parse_mode="Markdown",
-        )
-
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            f"🌐 *Translated (Hinglish):*\n\n{translated}",
-            parse_mode="Markdown",
-        )
-
-    except asyncio.CancelledError:
-        await update.message.reply_text("❌ OCR process was cancelled.")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Error during OCR: {e}")
-    finally:
-        if user_id in active_jobs:
-            active_jobs.pop(user_id, None)
-        os.remove(image_path)
-        await status_msg.delete()
-
-# -------------------------------
-# 📦 Handle File Upload (.zip / .txt)
-# -------------------------------
+# ============================================================
+# 📦 FILE HANDLING (OCR archives + .txt translation)
+# ============================================================
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    document = update.message.document
-    file_name = document.file_name.lower()
+    """Handles incoming archive or text uploads."""
+    doc = update.message.document
+    if not doc:
+        return await update.message.reply_text("⚠️ Please send a valid file.")
 
-    if not any(file_name.endswith(ext) for ext in (".zip", ".7z", ".cbz", ".txt")):
-        await update.message.reply_text("⚠️ Unsupported file type. Please upload a ZIP, CBZ, or TXT file.")
+    name = doc.file_name.lower()
+    temp_dir = tempfile.mkdtemp()
+    file_path = os.path.join(temp_dir, name)
+
+    file = await context.bot.get_file(doc.file_id)
+    await file.download_to_drive(file_path)
+
+    chat_id = update.effective_chat.id
+
+    # --- Handle OCR archives ---
+    if any(name.endswith(ext) for ext in (".zip", ".7z", ".cbz")):
+        active_jobs[chat_id] = {"cancel": False}
+        await update.message.reply_text(
+            f"📦 *{doc.file_name}* received — queued for OCR.\n"
+            "⚙️ Please wait, I’m extracting and reading your images...",
+            parse_mode="Markdown"
+        )
+        asyncio.create_task(worker(update, context, file_path, temp_dir, chat_id))
         return
 
-    file = await document.get_file()
-
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        await file.download_to_drive(custom_path=tmp.name)
-        file_path = tmp.name
-
-    active_jobs[user_id] = asyncio.current_task()
-    status_msg = await update.message.reply_text("📦 Processing uploaded file... please wait.")
-
-    extracted_text = ""
-    try:
-        if file_name.endswith(".txt"):
+    # --- Handle text files for translation ---
+    if name.endswith(".txt"):
+        await update.message.reply_text(
+            f"📄 *{doc.file_name}* received — reading text for translation...",
+            parse_mode="Markdown"
+        )
+        try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                extracted_text = f.read()
-        else:
-            with zipfile.ZipFile(file_path, "r") as archive:
-                for member in archive.namelist():
-                    if member.lower().endswith((".png", ".jpg", ".jpeg")):
-                        with archive.open(member) as img_file:
-                            img = Image.open(img_file)
-                            extracted_text += pytesseract.image_to_string(img) + "\n"
+                content = f.read()
 
-        if not extracted_text.strip():
-            await update.message.reply_text("⚠️ No readable text found in the file.")
-            return
+            if len(content) > 15000:
+                await update.message.reply_text(
+                    "⚠️ File too large for translation (>15 KB). Please send a smaller `.txt` file."
+                )
+            elif not content.strip():
+                await update.message.reply_text("⚠️ The file seems empty.")
+            else:
+                await translate_txt_content(update, context, content, file_name=name)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error reading `.txt`: {e}")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        return
 
-        translated = await translate_to_hinglish(extracted_text)
+    # --- Unsupported file type ---
+    await update.message.reply_text(
+        "⚠️ Unsupported file type.\n\n"
+        "Send one of these:\n"
+        "• `.zip`, `.cbz`, `.7z` → OCR from images\n"
+        "• `.txt` → Translate English text to Hinglish\n"
+        "• Or send an image directly"
+    )
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
-        # Write result to temporary file
-        output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
-        output_file.write(translated.encode("utf-8"))
-        output_file.close()
 
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=open(output_file.name, "rb"),
-            filename="translated_output.txt",
-            caption="✅ OCR + Hinglish translation completed!",
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels an ongoing OCR process."""
+    chat_id = update.effective_chat.id
+    if chat_id in active_jobs:
+        active_jobs[chat_id]["cancel"] = True
+        await update.message.reply_text("🛑 Cancel request received. Stopping your OCR task...")
+        logging.info(f"🛑 Cancel flag set for chat {chat_id}")
+    else:
+        await update.message.reply_text("⚠️ You don’t have any active OCR process.")
+
+
+async def worker(update, context, file_path, temp_dir, chat_id):
+    """Performs extraction + OCR in background for archives."""
+    try:
+        logging.info(f"🚀 Starting OCR job for chat {chat_id} on {file_path}")
+        await process_archive(update, context, file_path, temp_dir, active_jobs)
+        logging.info(f"✅ OCR job completed for chat {chat_id}")
+    except Exception as e:
+        logging.error(f"❌ Worker error for chat {chat_id}: {e}")
+        try:
+            await update.message.reply_text(f"❌ Error during OCR: {e}")
+        except Exception:
+            pass
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        if chat_id in active_jobs:
+            del active_jobs[chat_id]
+        logging.info(f"🧹 Cleaned up temp data for chat {chat_id}")
+
+
+# ============================================================
+# 🖼️ SINGLE IMAGE HANDLING
+# ============================================================
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles single image uploads (photo messages) for OCR."""
+    if not update.message.photo:
+        return await update.message.reply_text("⚠️ No photo found in the message.")
+
+    photo = update.message.photo[-1]  # highest resolution
+    file = await context.bot.get_file(photo.file_id)
+
+    temp_dir = tempfile.mkdtemp()
+    image_path = os.path.join(temp_dir, "uploaded_image.jpg")
+    await file.download_to_drive(image_path)
+
+    chat_id = update.effective_chat.id
+    active_jobs[chat_id] = {"cancel": False}
+
+    await update.message.reply_text("🖼️ Image received — queued for OCR...")
+
+    asyncio.create_task(image_worker(update, context, image_path, temp_dir, chat_id))
+
+
+async def image_worker(update, context, image_path, temp_dir, chat_id):
+    """Background worker for single-image OCR."""
+    try:
+        logging.info(f"🚀 Starting single-image OCR for chat {chat_id} on {image_path}")
+        await process_single_image(update, context, image_path, active_jobs)
+        logging.info(f"✅ Single-image OCR completed for chat {chat_id}")
+    except Exception as e:
+        logging.error(f"❌ Image worker error for chat {chat_id}: {e}")
+        try:
+            await update.message.reply_text(f"❌ Error during image OCR: {e}")
+        except Exception:
+            pass
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        if chat_id in active_jobs:
+            del active_jobs[chat_id]
+        logging.info(f"🧹 Cleaned up image temp data for chat {chat_id}")
+
+
+# ============================================================
+# 💬 TRANSLATION COMMAND
+# ============================================================
+def chunk_text_lines(text: str, batch_size: int = 5):
+    """Split text into small batches of lines (preserving blank lines)."""
+    lines = text.splitlines()
+    for i in range(0, len(lines), batch_size):
+        yield lines[i:i + batch_size]
+
+
+def make_progress_bar(current: int, total: int, length: int = 12) -> str:
+    """Generate a textual progress bar."""
+    filled = int(length * current / total)
+    empty = length - filled
+    bar = "█" * filled + "░" * empty
+    percent = int((current / total) * 100)
+    return f"[{bar}] {percent}% ({current}/{total})"
+
+
+async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Translates English dialogues to Hinglish using Gemini in small batches."""
+    text = " ".join(context.args) if context.args else None
+    if not text and update.message.reply_to_message:
+        text = update.message.reply_to_message.text or update.message.reply_to_message.caption
+
+    if not text:
+        return await update.message.reply_text(
+            "💬 Use `/translate <text>` or reply to a message to translate it.",
+            parse_mode="Markdown"
         )
 
-        os.remove(output_file.name)
+    await translate_txt_content(update, context, text)
 
-    except asyncio.CancelledError:
-        await update.message.reply_text("❌ Process cancelled.")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Error: {e}")
-    finally:
-        if user_id in active_jobs:
-            active_jobs.pop(user_id, None)
-        os.remove(file_path)
-        await status_msg.delete()
+
+# ============================================================
+# 📄 TRANSLATION HELPER — OUTPUT AS .TXT (with progress bar)
+# ============================================================
+async def translate_txt_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, file_name: str = None):
+    """Translate text content (from /translate or .txt file) and return a .txt file."""
+    progress_msg = await update.message.reply_text("⏳ Preparing translation...")
+
+    batches = list(chunk_text_lines(text, batch_size=5))
+    total_batches = len(batches)
+    translated_batches = []
+
+    await progress_msg.edit_text(f"📦 Found {total_batches} batches. Starting translation...")
+
+    for idx, batch in enumerate(batches, start=1):
+        batch_text = "\n".join(batch)
+        translated = translate_to_hinglish(batch_text)
+        translated_batches.append(translated)
+
+        # --- Update progress bar in one message ---
+        bar = make_progress_bar(idx, total_batches)
+        try:
+            await progress_msg.edit_text(f"📝 Translating... {bar}")
+        except Exception:
+            pass
+
+        await asyncio.sleep(1.0)
+
+    # Combine all batches preserving original formatting
+    full_translation = "\n".join(translated_batches)
+
+    # --- Write translation to a .txt file ---
+    base_name = os.path.splitext(file_name or "translation")[0]
+    output_name = f"{base_name}_hinglish.txt"
+    out_path = os.path.join(tempfile.gettempdir(), output_name)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(full_translation)
+
+    await progress_msg.edit_text("✅ Translation complete! Preparing file...")
+
+    await update.message.reply_document(
+        document=open(out_path, "rb"),
+        filename=output_name,
+        caption="📜 Hinglish Translation (original formatting preserved)"
+    )
+
+    try:
+        os.remove(out_path)
+    except Exception:
+        pass
+
+    await progress_msg.edit_text("🎉 Translation completed successfully!")
