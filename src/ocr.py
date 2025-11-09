@@ -5,6 +5,42 @@ import py7zr
 from PIL import Image, UnidentifiedImageError
 import pytesseract
 import logging
+import aiohttp
+from .handlers import user_settings
+
+# --- OnlineOCR.net config ---
+ONLINE_OCR_API_URL = "https://api.onlineocr.net/v1/ocr"
+ONLINE_OCR_API_KEY = "A1833830-53E6-4EE8-BD63-5E5D8291A4FB"
+ONLINE_OCR_USER_ID = "YOWEM"
+
+
+async def ocr_image(image_path: str, ocr_mode: str = "local") -> str:
+    """Perform OCR using local Tesseract or Online OCR API depending on mode."""
+    if ocr_mode == "local":
+        try:
+            img = Image.open(image_path)
+            return pytesseract.image_to_string(img)
+        except Exception as e:
+            logging.error(f"❌ Local OCR error: {e}")
+            return ""
+    else:
+        try:
+            async with aiohttp.ClientSession() as session:
+                with open(image_path, "rb") as f:
+                    form = aiohttp.FormData()
+                    form.add_field("file", f, filename=os.path.basename(image_path))
+                    form.add_field("apikey", ONLINE_OCR_API_KEY)
+                    form.add_field("user", ONLINE_OCR_USER_ID)
+                    async with session.post(ONLINE_OCR_API_URL, data=form) as resp:
+                        if resp.status != 200:
+                            logging.error(f"❌ Online OCR failed: {resp.status}")
+                            return ""
+                        data = await resp.json()
+                        return data.get("text", "") or ""
+        except Exception as e:
+            logging.error(f"❌ Online OCR API error: {e}")
+            return ""
+
 
 async def process_archive(update, context, archive_path, temp_dir, active_jobs):
     chat_id = update.effective_chat.id
@@ -13,7 +49,6 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
 
     logging.info(f"📂 Extracting archive: {archive_path}")
 
-    # --- Extract the archive ---
     try:
         if archive_path.endswith((".zip", ".cbz")):
             with zipfile.ZipFile(archive_path, "r") as z:
@@ -29,7 +64,6 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
         logging.error(f"❌ Extraction error: {e}")
         return
 
-    # --- Find image files ---
     image_files = []
     for root, _, files in os.walk(extract_dir):
         for f in files:
@@ -42,9 +76,10 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
 
     await update.message.reply_text(f"🔍 Found {len(image_files)} image(s) — starting OCR...")
 
+    ocr_mode = user_settings.get(chat_id, {}).get("ocr_mode", "local")
     all_text = ""
+
     for idx, img_path in enumerate(sorted(image_files), start=1):
-        # --- Check for cancel flag ---
         if chat_id in active_jobs and active_jobs[chat_id].get("cancel"):
             await update.message.reply_text("🛑 OCR process cancelled.")
             logging.info(f"🛑 OCR cancelled for chat {chat_id}")
@@ -52,40 +87,31 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
 
         filename = os.path.basename(img_path)
         try:
-            img = Image.open(img_path)
-            text = pytesseract.image_to_string(img)
+            text = await ocr_image(img_path, ocr_mode)
             text_out = text.strip() or "(No text detected)"
             all_text += f"\n\n--- {filename} ---\n{text_out}"
 
-            # Send preview for first few images
             if idx <= 3:
                 await update.message.reply_text(
                     f"📄 *{filename}* ({idx}/{len(image_files)}):\n\n{text_out}",
                     parse_mode="Markdown"
                 )
-
                 if idx == 3:
                     await update.message.reply_text(
-                        "🕐 Please wait — still processing remaining images. "
-                        "You’ll receive the full result file soon."
+                        "🕐 Please wait — still processing remaining images..."
                     )
-
         except UnidentifiedImageError:
             logging.warning(f"⚠️ Skipping invalid image: {img_path}")
         except Exception as e:
             logging.error(f"⚠️ OCR error for {img_path}: {e}")
             await update.message.reply_text(f"⚠️ Error reading {filename}: {e}")
 
-    # --- Save and send the result file ---
     if all_text.strip():
-        # Use same name as original archive, but with .txt extension
         base_name = os.path.splitext(os.path.basename(archive_path))[0]
         result_filename = f"{base_name}.txt"
         out_path = os.path.join(temp_dir, result_filename)
-
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(all_text)
-
         await update.message.reply_document(
             document=open(out_path, "rb"),
             filename=result_filename,
@@ -96,45 +122,20 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
         await update.message.reply_text("⚠️ OCR complete, but no readable text was detected.")
 
 
-# ============================================================
-# Single-image OCR helper
-# ============================================================
 async def process_single_image(update, context, image_path, active_jobs=None):
-    """
-    Run OCR on a single image and send extracted text back to the user.
-    active_jobs can be provided (dict) to allow cancellation if needed.
-    """
+    """Run OCR on a single image and send extracted text."""
     chat_id = update.effective_chat.id
+    ocr_mode = user_settings.get(chat_id, {}).get("ocr_mode", "local")
     try:
-        # Check cancel (if active_jobs provided)
         if active_jobs and chat_id in active_jobs and active_jobs[chat_id].get("cancel"):
             await update.message.reply_text("🛑 OCR cancelled before start.")
             return
 
-        img = Image.open(image_path)
-        text = pytesseract.image_to_string(img).strip()
+        text = (await ocr_image(image_path, ocr_mode)).strip()
         if not text:
-            text = "(No readable text found)"
+            text = "(No text detected)"
 
-        # Respect Telegram message size; if big, send as file
-        if len(text) > 3500:
-            out_path = image_path + ".txt"
-            with open(out_path, "w", encoding="utf-8") as f:
-                f.write(text)
-            await update.message.reply_document(
-                document=open(out_path, "rb"),
-                filename=os.path.basename(out_path),
-                caption="📄 OCR result (full text)"
-            )
-            try:
-                os.remove(out_path)
-            except Exception:
-                pass
-        else:
-            await update.message.reply_text(f"📄 *Extracted Text:*\n\n{text}", parse_mode="Markdown")
-
-    except UnidentifiedImageError:
-        await update.message.reply_text("⚠️ Invalid image file — couldn’t read.")
+        await update.message.reply_text(f"📝 *Extracted Text:*\n\n{text}", parse_mode="Markdown")
     except Exception as e:
-        logging.error(f"❌ process_single_image error: {e}")
+        logging.error(f"❌ Single-image OCR error: {e}")
         await update.message.reply_text(f"❌ OCR error: {e}")
