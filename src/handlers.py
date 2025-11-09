@@ -180,3 +180,33 @@ async def image_worker(update, context, image_path, temp_dir, chat_id):
         if chat_id in active_jobs:
             del active_jobs[chat_id]
         logging.info(f"🧹 Cleaned up image temp data for chat {chat_id}")
+
+# ============================================================
+# 💬 TRANSLATE COMMAND — /translate
+# ============================================================
+async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles /translate <text> or replies for Hinglish translation."""
+    text = " ".join(context.args) if context.args else None
+
+    # Allow replying to a message
+    if not text and update.message.reply_to_message:
+        text = (
+            update.message.reply_to_message.text
+            or update.message.reply_to_message.caption
+        )
+
+    if not text:
+        await update.message.reply_text(
+            "💬 Use `/translate <text>` or reply to any message with `/translate`."
+        )
+        return
+
+    await update.message.reply_text("🔁 Translating to Hinglish... please wait.")
+    try:
+        translated = translate_to_hinglish(text)
+        await update.message.reply_text(
+            f"📜 *Hinglish Translation:*\n\n{translated}",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Translation failed: {e}")
