@@ -7,6 +7,7 @@ import pytesseract
 import logging
 import aiohttp
 import asyncio
+from telegram.helpers import escape_markdown  # ✅ Added for safe Telegram output
 
 ONLINEOCR_USERNAME = os.getenv("ONLINEOCR_USERNAME", "YOWEM")
 ONLINEOCR_LICENSE_KEY = os.getenv("ONLINEOCR_LICENSE_KEY", "A1833830-53E6-4EE8-BD63-5E5D8291A4FB")
@@ -60,13 +61,20 @@ async def process_archive(update, context, archive_path, temp_dir, active_jobs):
         f.write(all_text)
     await update.message.reply_document(open(result_file, "rb"), caption="✅ OCR complete (Tesseract)")
 
+
+# ✅ Updated function — safe Markdown escaping
 async def process_single_image(update, image_path):
     try:
         img = Image.open(image_path)
         text = pytesseract.image_to_string(img).strip() or "(No readable text found)"
-        await update.message.reply_text(f"📄 *Extracted Text (Tesseract):*\n\n{text}", parse_mode="Markdown")
+        safe_text = escape_markdown(text, version=2)  # Escape unsafe characters for Telegram MarkdownV2
+        await update.message.reply_text(
+            f"📄 *Extracted Text (Tesseract):*\n\n{safe_text}",
+            parse_mode="MarkdownV2"
+        )
     except Exception as e:
         await update.message.reply_text(f"❌ OCR error: {e}")
+
 
 # ============================================================
 # 🌐 ONLINEOCR.NET API
@@ -90,10 +98,16 @@ async def onlineocr_extract(image_path: str) -> str:
     except Exception as e:
         return f"❌ OnlineOCR API error: {e}"
 
+
 async def process_single_image_online(update, image_path):
     await update.message.reply_text("🌐 Using OnlineOCR.net for text extraction...")
     text = await onlineocr_extract(image_path)
-    await update.message.reply_text(f"📄 *Extracted Text (OnlineOCR):*\n\n{text}", parse_mode="Markdown")
+    safe_text = escape_markdown(text, version=2)
+    await update.message.reply_text(
+        f"📄 *Extracted Text (OnlineOCR):*\n\n{safe_text}",
+        parse_mode="MarkdownV2"
+    )
+
 
 async def process_archive_online(update, context, archive_path, temp_dir, active_jobs):
     chat_id = update.effective_chat.id
