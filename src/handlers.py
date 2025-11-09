@@ -1,3 +1,4 @@
+# /src/handlers.py
 import os
 import tempfile
 import asyncio
@@ -7,7 +8,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 from .ocr import process_archive
-from .translate import translate_to_hinglish  # ✅ New import
+from .translate import translate_to_hinglish
 
 # --- Logging setup ---
 handler = logging.StreamHandler(sys.stdout)
@@ -17,6 +18,10 @@ logging.basicConfig(level=logging.INFO, handlers=[handler])
 # --- Global state ---
 active_jobs = {}  # {chat_id: {"cancel": bool}}
 
+
+# ============================================================
+# 📦 OCR HANDLING
+# ============================================================
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles incoming archive uploads."""
@@ -40,12 +45,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_jobs[chat_id] = {"cancel": False}
 
     await update.message.reply_text(
-        f"📦 *{doc.file_name}* received — queued for processing.\n"
-        "⚙️ This might take a minute, but you can still chat or cancel with /cancel.",
+        f"📦 *{doc.file_name}* received — queued for OCR.\n"
+        "⚙️ Please wait, I’m extracting and reading your images...",
         parse_mode="Markdown"
     )
 
-    # Run in background
     asyncio.create_task(worker(update, context, file_path, temp_dir, chat_id))
 
 
@@ -54,7 +58,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id in active_jobs:
         active_jobs[chat_id]["cancel"] = True
-        await update.message.reply_text("🛑 Cancel request received. Stopping your current OCR task...")
+        await update.message.reply_text("🛑 Cancel request received. Stopping your OCR task...")
         logging.info(f"🛑 Cancel flag set for chat {chat_id}")
     else:
         await update.message.reply_text("⚠️ You don’t have any active OCR process.")
@@ -79,12 +83,20 @@ async def worker(update, context, file_path, temp_dir, chat_id):
         logging.info(f"🧹 Cleaned up temp data for chat {chat_id}")
 
 
-# --- New: Translation Command ---
-async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Translates English dialogues to Hinglish using Gemini."""
-    text = " ".join(context.args) if context.args else None
+# ============================================================
+# 💬 TRANSLATION COMMAND (Batch version)
+# ============================================================
 
-    # If no text argument, allow replying to another message
+def chunk_text_lines(text: str, batch_size: int = 5):
+    """Split text into small batches of lines."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for i in range(0, len(lines), batch_size):
+        yield lines[i:i + batch_size]
+
+
+async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Translates English dialogues to Hinglish using Gemini in small batches."""
+    text = " ".join(context.args) if context.args else None
     if not text and update.message.reply_to_message:
         text = update.message.reply_to_message.text or update.message.reply_to_message.caption
 
@@ -94,22 +106,47 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-    wait_msg = await update.message.reply_text("⏳ Translating your dialogues, please wait...")
+    wait_msg = await update.message.reply_text("⏳ Starting batch translation...")
 
-    translated = translate_to_hinglish(text)
+    batches = list(chunk_text_lines(text, batch_size=5))
+    total_batches = len(batches)
+    translated_batches = []
 
-    if translated.startswith("⚠️"):
-        await wait_msg.edit_text(translated)
-        return
+    await wait_msg.edit_text(f"📦 Found {total_batches} batches. Starting translation...")
 
-    if len(translated) > 4000:
-        with open("translation.txt", "w", encoding="utf-8") as f:
-            f.write(translated)
-        await wait_msg.delete()
+    for idx, batch in enumerate(batches, start=1):
+        batch_text = "\n".join(batch)
+        status_text = f"🔹 Translating batch {idx}/{total_batches}..."
+        try:
+            await update.message.reply_text(status_text)
+        except Exception:
+            pass
+
+        translated = translate_to_hinglish(batch_text)
+        translated_batches.append(translated)
+
+        # Send progress sample every 2–3 batches
+        if idx % 3 == 0 or idx == total_batches:
+            sample_preview = "\n".join(translated_batches[-2:])[:2000]
+            await update.message.reply_text(
+                f"✅ *Partial Translation (up to batch {idx}/{total_batches}):*\n\n{sample_preview}",
+                parse_mode="Markdown",
+            )
+
+        await asyncio.sleep(1.5)  # gentle delay to avoid rate limit
+
+    full_translation = "\n\n".join(translated_batches)
+
+    if len(full_translation) > 4000:
+        with open("translation_full.txt", "w", encoding="utf-8") as f:
+            f.write(full_translation)
         await update.message.reply_document(
-            "translation.txt", caption="📜 Hinglish Translation (File Version)"
+            "translation_full.txt", caption="📜 Complete Hinglish Translation"
         )
     else:
-        await wait_msg.edit_text(
-            f"📜 *Hinglish Translation:*\n\n{translated}", parse_mode="Markdown"
+        await update.message.reply_text(
+            f"📜 *Complete Hinglish Translation:*\n\n{full_translation}",
+            parse_mode="Markdown",
         )
+
+    await update.message.reply_text("🎉 Translation completed successfully!")
