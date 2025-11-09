@@ -10,7 +10,14 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from src.handlers import handle_file, worker, cancel, translate_command, handle_image
+from src.handlers import (
+    handle_file,
+    worker,
+    cancel,
+    translate_command,
+    handle_image,
+    set_ocr_mode,
+)
 
 # --- Environment variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -35,12 +42,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 Hello {user.first_name or 'there'}!\n\n"
         "I'm your **OCR + Hinglish Translation Bot**. Here's what I can do:\n\n"
         "📦 *1. OCR Extraction:*\n"
-        "→ Send me a `.zip`, `.cbz`, or `.7z` file containing images (manga/manhwa pages).\n"
+        "→ Send me a `.zip`, `.cbz`, or `.7z` file containing images.\n"
         "→ I'll extract and read the English dialogues from each image.\n\n"
-        "🖼️ *Also:* Send single images (JPEG/PNG/WEBP) and I'll OCR them directly.\n\n"
+        "🖼️ *Also:* Send single images and I'll OCR them directly.\n\n"
         "💬 *2. Hinglish Translation:*\n"
-        "→ Use `/translate <text>` or reply to any English text with `/translate`.\n"
-        "→ I’ll translate it into natural, casual Hinglish — in small batches for best quality.\n\n"
+        "→ Use `/translate <text>` or reply to any English text with `/translate`.\n\n"
+        "⚙️ *3. OCR Mode Control:*\n"
+        "→ Use `/ocrmode local` or `/ocrmode online` to choose between local Tesseract and OnlineOCR.\n\n"
         "✨ Try sending me a few dialogues or an image now!"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
@@ -52,16 +60,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧠 *Help — OCR + Hinglish Bot*\n\n"
         "📦 **For OCR (archives):**\n"
         "Send a `.zip`, `.cbz`, or `.7z` archive containing image pages.\n"
-        "I'll extract and read the text from all images automatically.\n\n"
+        "I'll extract and read text from all images automatically.\n\n"
         "🖼️ **For single images:**\n"
-        "Send a photo (JPEG, PNG, WEBP, etc.) and I'll OCR it and return the text.\n\n"
+        "Send a photo and I'll OCR it directly.\n\n"
         "💬 **For Translation:**\n"
-        "Use `/translate <text>` — or reply to any message with `/translate`.\n"
-        "I’ll translate it into Hinglish (Hindi + English mix).\n\n"
+        "Use `/translate <text>` or reply to a message with `/translate`.\n"
+        "I’ll translate it into Hinglish.\n\n"
+        "⚙️ **OCR Mode:**\n"
+        "Use `/ocrmode local` or `/ocrmode online` to switch OCR engines per user.\n\n"
         "📋 *Commands:*\n"
         "• `/translate` — Translate text to Hinglish\n"
         "• `/cancel` — Cancel any ongoing OCR task\n"
-        "• `/help` — Show this message again"
+        "• `/ocrmode` — View or set OCR mode\n"
+        "• `/help` — Show this help message"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -111,8 +122,9 @@ async def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("translate", translate_command))
+    app.add_handler(CommandHandler("ocrmode", set_ocr_mode))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_image))  # new: handle photos
+    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
 
     await asyncio.Event().wait()
 
