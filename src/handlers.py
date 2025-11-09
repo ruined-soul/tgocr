@@ -16,7 +16,33 @@ handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 
 # --- Global state ---
-active_jobs = {}  # {chat_id: {"cancel": bool}}
+active_jobs = {}   # {chat_id: {"cancel": bool}}
+user_settings = {}  # {chat_id: {"ocr_mode": "local" or "online"}}
+
+
+# ============================================================
+# ⚙️ OCR MODE COMMAND
+# ============================================================
+async def set_ocr_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Allows each user to choose OCR mode: local or online."""
+    chat_id = update.effective_chat.id
+
+    if not context.args:
+        current = user_settings.get(chat_id, {}).get("ocr_mode", "local")
+        await update.message.reply_text(
+            f"⚙️ Current OCR mode: *{current}*\n\n"
+            "Use `/ocrmode local` or `/ocrmode online` to switch.",
+            parse_mode="Markdown"
+        )
+        return
+
+    mode = context.args[0].lower()
+    if mode not in ("local", "online"):
+        await update.message.reply_text("❌ Invalid mode. Use `local` or `online`.", parse_mode="Markdown")
+        return
+
+    user_settings.setdefault(chat_id, {})["ocr_mode"] = mode
+    await update.message.reply_text(f"✅ OCR mode set to *{mode}* for this chat.", parse_mode="Markdown")
 
 
 # ============================================================
@@ -36,13 +62,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(file_path)
 
     chat_id = update.effective_chat.id
+    ocr_mode = user_settings.get(chat_id, {}).get("ocr_mode", "local")
 
     # --- Handle OCR archives ---
     if any(name.endswith(ext) for ext in (".zip", ".7z", ".cbz")):
         active_jobs[chat_id] = {"cancel": False}
         await update.message.reply_text(
             f"📦 *{doc.file_name}* received — queued for OCR.\n"
-            "⚙️ Please wait, I’m extracting and reading your images...",
+            f"⚙️ Using *{ocr_mode}* OCR mode. Please wait...",
             parse_mode="Markdown"
         )
         asyncio.create_task(worker(update, context, file_path, temp_dir, chat_id))
@@ -72,12 +99,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.rmtree(temp_dir, ignore_errors=True)
         return
 
-    # --- Unsupported file type ---
     await update.message.reply_text(
         "⚠️ Unsupported file type.\n\n"
         "Send one of these:\n"
         "• `.zip`, `.cbz`, `.7z` → OCR from images\n"
-        "• `.txt` → Translate English text to Hinglish\n"
+        "• `.txt` → Translate text\n"
         "• Or send an image directly"
     )
     shutil.rmtree(temp_dir, ignore_errors=True)
@@ -129,17 +155,18 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(image_path)
 
     chat_id = update.effective_chat.id
+    ocr_mode = user_settings.get(chat_id, {}).get("ocr_mode", "local")
+
     active_jobs[chat_id] = {"cancel": False}
 
-    await update.message.reply_text("🖼️ Image received — queued for OCR...")
-
+    await update.message.reply_text(f"🖼️ Image received — using *{ocr_mode}* OCR mode...", parse_mode="Markdown")
     asyncio.create_task(image_worker(update, context, image_path, temp_dir, chat_id))
 
 
 async def image_worker(update, context, image_path, temp_dir, chat_id):
     """Background worker for single-image OCR."""
     try:
-        logging.info(f"🚀 Starting single-image OCR for chat {chat_id} on {image_path}")
+        logging.info(f"🚀 Starting single-image OCR for chat {chat_id}")
         await process_single_image(update, context, image_path, active_jobs)
         logging.info(f"✅ Single-image OCR completed for chat {chat_id}")
     except Exception as e:
@@ -153,91 +180,3 @@ async def image_worker(update, context, image_path, temp_dir, chat_id):
         if chat_id in active_jobs:
             del active_jobs[chat_id]
         logging.info(f"🧹 Cleaned up image temp data for chat {chat_id}")
-
-
-# ============================================================
-# 💬 TRANSLATION COMMAND
-# ============================================================
-def chunk_text_lines(text: str, batch_size: int = 5):
-    """Split text into small batches of lines (preserving blank lines)."""
-    lines = text.splitlines()
-    for i in range(0, len(lines), batch_size):
-        yield lines[i:i + batch_size]
-
-
-def make_progress_bar(current: int, total: int, length: int = 12) -> str:
-    """Generate a textual progress bar."""
-    filled = int(length * current / total)
-    empty = length - filled
-    bar = "█" * filled + "░" * empty
-    percent = int((current / total) * 100)
-    return f"[{bar}] {percent}% ({current}/{total})"
-
-
-async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Translates English dialogues to Hinglish using Gemini in small batches."""
-    text = " ".join(context.args) if context.args else None
-    if not text and update.message.reply_to_message:
-        text = update.message.reply_to_message.text or update.message.reply_to_message.caption
-
-    if not text:
-        return await update.message.reply_text(
-            "💬 Use `/translate <text>` or reply to a message to translate it.",
-            parse_mode="Markdown"
-        )
-
-    await translate_txt_content(update, context, text)
-
-
-# ============================================================
-# 📄 TRANSLATION HELPER — OUTPUT AS .TXT (with progress bar)
-# ============================================================
-async def translate_txt_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, file_name: str = None):
-    """Translate text content (from /translate or .txt file) and return a .txt file."""
-    progress_msg = await update.message.reply_text("⏳ Preparing translation...")
-
-    batches = list(chunk_text_lines(text, batch_size=5))
-    total_batches = len(batches)
-    translated_batches = []
-
-    await progress_msg.edit_text(f"📦 Found {total_batches} batches. Starting translation...")
-
-    for idx, batch in enumerate(batches, start=1):
-        batch_text = "\n".join(batch)
-        translated = translate_to_hinglish(batch_text)
-        translated_batches.append(translated)
-
-        # --- Update progress bar in one message ---
-        bar = make_progress_bar(idx, total_batches)
-        try:
-            await progress_msg.edit_text(f"📝 Translating... {bar}")
-        except Exception:
-            pass
-
-        await asyncio.sleep(1.0)
-
-    # Combine all batches preserving original formatting
-    full_translation = "\n".join(translated_batches)
-
-    # --- Write translation to a .txt file ---
-    base_name = os.path.splitext(file_name or "translation")[0]
-    output_name = f"{base_name}_hinglish.txt"
-    out_path = os.path.join(tempfile.gettempdir(), output_name)
-
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(full_translation)
-
-    await progress_msg.edit_text("✅ Translation complete! Preparing file...")
-
-    await update.message.reply_document(
-        document=open(out_path, "rb"),
-        filename=output_name,
-        caption="📜 Hinglish Translation (original formatting preserved)"
-    )
-
-    try:
-        os.remove(out_path)
-    except Exception:
-        pass
-
-    await progress_msg.edit_text("🎉 Translation completed successfully!")
