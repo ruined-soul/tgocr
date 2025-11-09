@@ -9,7 +9,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from src.handlers import handle_file, worker, cancel
+from src.handlers import handle_file, worker, cancel, translate_command  # ✅ Updated import
 
 # --- Environment variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -32,11 +32,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I'm your *OCR Bot* — I can extract text from images inside archives.\n\n"
         "📦 *How to use me:*\n"
         "1️⃣ Send me a `.zip`, `.7z`, or `.cbz` file containing images (JPG, PNG, etc.)\n"
-        "2️⃣ I’ll extract the images and perform OCR on each.\n"
-        "3️⃣ I’ll send back the recognized text for every image.\n\n"
-        "Use /cancel anytime to stop a running task."
+        "2️⃣ I’ll extract and perform OCR on each image.\n"
+        "3️⃣ I’ll send back the recognized text.\n\n"
+        "💡 You can also use /translate to turn English text into Hinglish!"
     )
-
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 
@@ -48,11 +47,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `.zip`, `.cbz`, `.7z`\n\n"
         "🖼️ *Supported image types:*\n"
         "• JPG, PNG, BMP, TIFF, WEBP\n\n"
-        "📋 *How it works:*\n"
-        "1️⃣ You send a supported archive file.\n"
-        "2️⃣ I extract and scan all images for text.\n"
-        "3️⃣ I send back the text from each image.\n\n"
-        "💡 *Tip:* Use /cancel to stop processing if needed."
+        "📋 *Commands:*\n"
+        "• /translate <text> — Translate English → Hinglish\n"
+        "• /cancel — Cancel OCR processing\n\n"
+        "💡 Tip: You can reply with /translate to any text message!"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -97,14 +95,12 @@ async def main():
     print(f"✅ Webhook set to {webhook_url}")
     print("🤖 Bot is up and running on port 8000 (Koyeb)")
 
-    # Register bot handlers
+    # Register handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("translate", translate_command))  # ✅ New command
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-
-    # Start background OCR worker
-    # asyncio.create_task(worker())
 
     print("📡 Waiting for Telegram updates...")
     await asyncio.Event().wait()
