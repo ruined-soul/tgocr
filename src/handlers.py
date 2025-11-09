@@ -20,20 +20,15 @@ active_jobs = {}  # {chat_id: {"cancel": bool}}
 
 
 # ============================================================
-# 📦 OCR HANDLING (archives)
+# 📦 OCR HANDLING (archives + text)
 # ============================================================
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles incoming archive uploads."""
+    """Handles incoming archive or text uploads."""
     doc = update.message.document
     if not doc:
         return await update.message.reply_text("⚠️ Please send a valid file.")
 
     name = doc.file_name.lower()
-    if not any(name.endswith(ext) for ext in (".zip", ".7z", ".cbz")):
-        return await update.message.reply_text(
-            "⚠️ Unsupported file type.\n\nPlease send a `.zip`, `.cbz`, or `.7z` archive containing images."
-        )
-
     temp_dir = tempfile.mkdtemp()
     file_path = os.path.join(temp_dir, name)
 
@@ -41,16 +36,51 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(file_path)
 
     chat_id = update.effective_chat.id
-    active_jobs[chat_id] = {"cancel": False}
 
+    # --- Handle OCR archives ---
+    if any(name.endswith(ext) for ext in (".zip", ".7z", ".cbz")):
+        active_jobs[chat_id] = {"cancel": False}
+        await update.message.reply_text(
+            f"📦 *{doc.file_name}* received — queued for OCR.\n"
+            "⚙️ Please wait, I’m extracting and reading your images...",
+            parse_mode="Markdown"
+        )
+        asyncio.create_task(worker(update, context, file_path, temp_dir, chat_id))
+        return
+
+    # --- Handle text files for translation ---
+    if name.endswith(".txt"):
+        await update.message.reply_text(f"📄 *{doc.file_name}* received — reading text for translation...",
+                                        parse_mode="Markdown")
+        try:
+            # Read the text file safely
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+
+            # Avoid extremely large text files (limit ~15 KB)
+            if len(content) > 15000:
+                await update.message.reply_text(
+                    "⚠️ File too large for free-tier translation. Please send a smaller `.txt` (<15 KB)."
+                )
+            elif not content.strip():
+                await update.message.reply_text("⚠️ The file seems empty.")
+            else:
+                await translate_txt_content(update, context, content)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error reading `.txt`: {e}")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        return
+
+    # --- Unsupported file type ---
     await update.message.reply_text(
-        f"📦 *{doc.file_name}* received — queued for OCR.\n"
-        "⚙️ Please wait, I’m extracting and reading your images...",
-        parse_mode="Markdown"
+        "⚠️ Unsupported file type.\n\n"
+        "Send one of these:\n"
+        "• `.zip`, `.cbz`, `.7z` → OCR from images\n"
+        "• `.txt` → Translate English text to Hinglish\n"
+        "• Or send an image directly"
     )
-
-    # Run archive processing in background
-    asyncio.create_task(worker(update, context, file_path, temp_dir, chat_id))
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -88,7 +118,6 @@ async def worker(update, context, file_path, temp_dir, chat_id):
 # ============================================================
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles single image uploads (photo messages) for OCR."""
-    # Telegram photo sizes are provided in increasing order; take the largest
     if not update.message.photo:
         return await update.message.reply_text("⚠️ No photo found in the message.")
 
@@ -96,7 +125,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(photo.file_id)
 
     temp_dir = tempfile.mkdtemp()
-    # Keep original extension if available, default to .jpg
     image_path = os.path.join(temp_dir, "uploaded_image.jpg")
     await file.download_to_drive(image_path)
 
@@ -105,7 +133,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🖼️ Image received — queued for OCR...")
 
-    # Run single-image OCR in background to avoid blocking webhook processing
     asyncio.create_task(image_worker(update, context, image_path, temp_dir, chat_id))
 
 
@@ -113,7 +140,6 @@ async def image_worker(update, context, image_path, temp_dir, chat_id):
     """Background worker for single-image OCR."""
     try:
         logging.info(f"🚀 Starting single-image OCR for chat {chat_id} on {image_path}")
-        # process_single_image handles sending results/messages
         await process_single_image(update, context, image_path, active_jobs)
         logging.info(f"✅ Single-image OCR completed for chat {chat_id}")
     except Exception as e:
@@ -151,6 +177,14 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+    await translate_txt_content(update, context, text)
+
+
+# ============================================================
+# 📄 TRANSLATE FILE CONTENT HELPER
+# ============================================================
+async def translate_txt_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """Translate text content (from command or file)."""
     wait_msg = await update.message.reply_text("⏳ Starting batch translation...")
 
     batches = list(chunk_text_lines(text, batch_size=5))
@@ -170,7 +204,7 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         translated = translate_to_hinglish(batch_text)
         translated_batches.append(translated)
 
-        # Send progress sample every 2–3 batches
+        # Send progress every 2–3 batches
         if idx % 3 == 0 or idx == total_batches:
             sample_preview = "\n".join(translated_batches[-2:])[:2000]
             await update.message.reply_text(
@@ -178,10 +212,11 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
 
-        await asyncio.sleep(1.5)  # gentle delay to avoid rate limit
+        await asyncio.sleep(1.5)
 
     full_translation = "\n\n".join(translated_batches)
 
+    # Send full translation as text or file
     if len(full_translation) > 4000:
         with open("translation_full.txt", "w", encoding="utf-8") as f:
             f.write(full_translation)
