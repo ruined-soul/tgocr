@@ -20,7 +20,7 @@ active_jobs = {}  # {chat_id: {"cancel": bool}}
 
 
 # ============================================================
-# 📦 OCR HANDLING (archives + text)
+# 📦 FILE HANDLING (OCR archives + .txt translation)
 # ============================================================
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles incoming archive or text uploads."""
@@ -50,22 +50,23 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- Handle text files for translation ---
     if name.endswith(".txt"):
-        await update.message.reply_text(f"📄 *{doc.file_name}* received — reading text for translation...",
-                                        parse_mode="Markdown")
+        await update.message.reply_text(
+            f"📄 *{doc.file_name}* received — reading text for translation...",
+            parse_mode="Markdown"
+        )
         try:
-            # Read the text file safely
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
 
-            # Avoid extremely large text files (limit ~15 KB)
+            # Limit file size to avoid hitting free-tier limits
             if len(content) > 15000:
                 await update.message.reply_text(
-                    "⚠️ File too large for free-tier translation. Please send a smaller `.txt` (<15 KB)."
+                    "⚠️ File too large for translation (>15 KB). Please send a smaller `.txt` file."
                 )
             elif not content.strip():
                 await update.message.reply_text("⚠️ The file seems empty.")
             else:
-                await translate_txt_content(update, context, content)
+                await translate_txt_content(update, context, content, file_name=name)
         except Exception as e:
             await update.message.reply_text(f"❌ Error reading `.txt`: {e}")
         finally:
@@ -156,11 +157,11 @@ async def image_worker(update, context, image_path, temp_dir, chat_id):
 
 
 # ============================================================
-# 💬 TRANSLATION COMMAND (Batch version)
+# 💬 TRANSLATION COMMAND
 # ============================================================
 def chunk_text_lines(text: str, batch_size: int = 5):
-    """Split text into small batches of lines."""
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    """Split text into small batches of lines (preserving blank lines)."""
+    lines = text.splitlines()  # keep formatting (blank lines too)
     for i in range(0, len(lines), batch_size):
         yield lines[i:i + batch_size]
 
@@ -181,52 +182,50 @@ async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# 📄 TRANSLATE FILE CONTENT HELPER
+# 📄 TRANSLATION HELPER — OUTPUT AS .TXT
 # ============================================================
-async def translate_txt_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Translate text content (from command or file)."""
-    wait_msg = await update.message.reply_text("⏳ Starting batch translation...")
+async def translate_txt_content(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, file_name: str = None):
+    """Translate text content (from /translate or .txt file) and return a .txt file."""
+    wait_msg = await update.message.reply_text("⏳ Starting translation...")
 
+    # Split text into smaller batches (for long files)
     batches = list(chunk_text_lines(text, batch_size=5))
     total_batches = len(batches)
     translated_batches = []
 
-    await wait_msg.edit_text(f"📦 Found {total_batches} batches. Starting translation...")
+    await wait_msg.edit_text(f"📦 Found {total_batches} batches. Translating to Hinglish...")
 
     for idx, batch in enumerate(batches, start=1):
         batch_text = "\n".join(batch)
-        status_text = f"🔹 Translating batch {idx}/{total_batches}..."
-        try:
-            await update.message.reply_text(status_text)
-        except Exception:
-            pass
-
         translated = translate_to_hinglish(batch_text)
         translated_batches.append(translated)
 
-        # Send progress every 2–3 batches
-        if idx % 3 == 0 or idx == total_batches:
-            sample_preview = "\n".join(translated_batches[-2:])[:2000]
-            await update.message.reply_text(
-                f"✅ *Partial Translation (up to batch {idx}/{total_batches}):*\n\n{sample_preview}",
-                parse_mode="Markdown",
-            )
+        # Optional progress message
+        if idx % 4 == 0 or idx == total_batches:
+            await update.message.reply_text(f"📝 Completed batch {idx}/{total_batches}...")
 
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.0)
 
-    full_translation = "\n\n".join(translated_batches)
+    # Combine all batches preserving original formatting
+    full_translation = "\n".join(translated_batches)
 
-    # Send full translation as text or file
-    if len(full_translation) > 4000:
-        with open("translation_full.txt", "w", encoding="utf-8") as f:
-            f.write(full_translation)
-        await update.message.reply_document(
-            "translation_full.txt", caption="📜 Complete Hinglish Translation"
-        )
-    else:
-        await update.message.reply_text(
-            f"📜 *Complete Hinglish Translation:*\n\n{full_translation}",
-            parse_mode="Markdown",
-        )
+    # --- Write translation to a .txt file ---
+    base_name = os.path.splitext(file_name or "translation")[0]
+    output_name = f"{base_name}_hinglish.txt"
+    out_path = os.path.join(tempfile.gettempdir(), output_name)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(full_translation)
+
+    await update.message.reply_document(
+        document=open(out_path, "rb"),
+        filename=output_name,
+        caption="📜 Hinglish Translation (preserving original formatting)"
+    )
+
+    try:
+        os.remove(out_path)
+    except Exception:
+        pass
 
     await update.message.reply_text("🎉 Translation completed successfully!")
