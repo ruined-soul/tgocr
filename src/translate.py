@@ -5,36 +5,33 @@ from google.genai.errors import APIError
 
 # --- Configuration ---
 MODEL_NAME = "gemini-2.5-flash"
-
-# You can set this key in Koyeb’s environment variables for security
 API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not API_KEY:
     raise ValueError("❌ GEMINI_API_KEY environment variable is missing.")
 
-# --- Initialize client ---
+# Initialize Gemini client
 client = genai.Client(api_key=API_KEY)
 
-# --- Translation Style Guide ---
+# --- Style guide for translation ---
 STYLE_GUIDE = """
 YOU ARE MY MANGA/MANHWA DIALOGUE TRANSLATION ASSISTANT.
-YOUR JOB IS TO TRANSLATE ENGLISH DIALOGUES INTO CASUAL HINGLISH (MIX OF HINDI + ENGLISH) IN THE STYLE BELOW.
+YOUR JOB IS TO TRANSLATE ENGLISH DIALOGUES INTO CASUAL HINGLISH (MIX OF HINDI + ENGLISH).
 
 RULES:
-1. Translate all lines accurately, in order, and with full emotion.
-2. Output only the translated Hinglish dialogues — no explanations.
-3. Keep emotion and tone same as original (funny, angry, sad, etc.).
-4. Maintain casing (UPPERCASE → uppercase).
-5. Avoid unnatural commas or punctuation.
-6. Don’t translate names, powers, or unique terms.
-7. Keep translations short, emotional, natural, and flowy.
+1. Translate all lines accurately, naturally, and emotionally.
+2. Output ONLY the translated Hinglish dialogues (no explanations).
+3. Maintain tone and casing from the original.
+4. Avoid unnatural commas or punctuation.
+5. Don't translate names, powers, or places.
+6. Keep translations concise and natural.
 
 EXAMPLES:
 "YO, FREE-LOADER." → "OYE, MUFTKHOR."
 "AS SULKY AS EVER, I SEE." → "HAMESHA KI TARAH MUH FULA RAKHHA HAI, BADHIYA HAI."
 """
 
-# --- Translation Function ---
+# --- Translation function ---
 def translate_to_hinglish(english_text: str) -> str:
     """Translate English text to Hinglish using Gemini."""
     prompt = f"{STYLE_GUIDE}\n\n--- DIALOGUES TO TRANSLATE ---\n{english_text}"
