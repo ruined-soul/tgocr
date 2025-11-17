@@ -1,0 +1,7 @@
+python-telegram-bot==21.4
+pytesseract
+Pillow
+py7zr
+aiofiles
+aiohttp
+google-genai
